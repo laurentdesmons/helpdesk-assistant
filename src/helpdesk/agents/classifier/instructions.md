@@ -29,8 +29,11 @@ Examples: "how many parental leave weeks do I get", "how do I enroll in dental",
 - **Paycheck / pay amount problems** ("my paycheck is wrong", "I was underpaid")
   → **hr**. Payroll is HR's domain even though it involves money. Reserve
   **billing** for what the company charges *customers* or pays *vendors*.
-- **Software**: "install X" / "I need access to X" → support. "buy X" / "renew the
-  X contract" / "add licenses" → billing.
+- **Software**: getting software onto a machine or gaining access to a seat —
+  "install X", "I need access to X", "I need a licensed/approved copy of X for my
+  team" → **support**. Only the commercial transaction — "buy X", "renew the X
+  contract", "add N licenses", "what does X cost" → **billing**. The words
+  "license" and "approved" on their own do not make it billing.
 - **A request that spans two categories** → pick the one that owns the *action the
   user needs*, and lower your confidence.
 

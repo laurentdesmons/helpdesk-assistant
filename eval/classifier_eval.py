@@ -214,6 +214,12 @@ async def main() -> int:
     ap.add_argument("--concurrency", type=int, default=5)
     ap.add_argument("--gate", action="store_true", help="exit non-zero if accuracy < --min-accuracy")
     ap.add_argument("--min-accuracy", type=float, default=0.85)
+    ap.add_argument(
+        "--compare",
+        type=Path,
+        help="a prior report JSON; report per-row category parity (for local-vs-remote cutover)",
+    )
+    ap.add_argument("--min-parity", type=float, default=0.95, help="with --gate, min row parity")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
 
@@ -233,8 +239,26 @@ async def main() -> int:
     out_path.write_text(json.dumps(asdict(report), indent=2), "utf-8")
     console.print(f"[dim]report -> {out_path}[/dim]")
 
+    parity: float | None = None
+    if args.compare:
+        prior = {r["request_id"]: r["predicted"] for r in json.loads(args.compare.read_text("utf-8"))["rows"]}
+        shared = [r for r in report.rows if r["request_id"] in prior]
+        agree = [r for r in shared if r["predicted"] == prior[r["request_id"]]]
+        parity = len(agree) / len(shared) if shared else 0.0
+        console.print(
+            f"[dim]category parity vs {args.compare.name}:[/dim] "
+            f"[bold]{parity:.1%}[/bold] ({len(agree)}/{len(shared)} rows)"
+        )
+        for r in shared:
+            was = prior[r["request_id"]]
+            if r["predicted"] != was:
+                console.print(f"  [yellow]{r['request_id']}[/yellow]: was {was}, now {r['predicted']}")
+
     if args.gate and report.accuracy < args.min_accuracy:
         console.print(f"[red]GATE FAILED: accuracy {report.accuracy:.1%} < {args.min_accuracy:.0%}[/red]")
+        return 1
+    if args.gate and parity is not None and parity < args.min_parity:
+        console.print(f"[red]GATE FAILED: parity {parity:.1%} < {args.min_parity:.0%}[/red]")
         return 1
     return 0
 

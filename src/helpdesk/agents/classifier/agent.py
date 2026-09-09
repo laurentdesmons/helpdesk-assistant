@@ -11,51 +11,68 @@ import logging
 from pathlib import Path
 
 from agent_framework import Agent
-from agent_framework.anthropic import AnthropicFoundryClient
-from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+from agent_framework.foundry import FoundryChatClient
+from azure.identity import DefaultAzureCredential
 
 from helpdesk.config import Settings
 from helpdesk.contracts import Classification, ClassifierInput
 
 logger = logging.getLogger("helpdesk.classifier")
 
-# Entra ID scope for Foundry data-plane (model inference) calls.
-_FOUNDRY_SCOPE = "https://cognitiveservices.azure.com/.default"
-
 _INSTRUCTIONS = (Path(__file__).parent / "instructions.md").read_text("utf-8")
+
+# Appended to the prompt on a retry when the first response didn't parse.
+JSON_ONLY_SUFFIX = (
+    '\n\nReturn ONLY the JSON object: {"category": "...", "confidence": 0.0, "rationale": "..."}'
+)
 
 
 def build_classifier_agent(settings: Settings) -> Agent:
-    """Construct the classifier as an in-process MAF agent on Claude Haiku 4.5."""
-    settings.require("classifier_model")
-    resource = settings.resolve_anthropic_resource()
+    """Construct the classifier as an in-process MAF agent on a Foundry GPT model.
 
-    client = AnthropicFoundryClient(
-        resource=resource,
+    Uses ``FoundryChatClient`` against the project endpoint (OpenAI-family Responses
+    API). In the deployed container the endpoint comes from the platform-injected
+    ``FOUNDRY_PROJECT_ENDPOINT`` and the call runs as the agent's managed identity,
+    which has implicit project-scoped inference access — no extra RBAC grant.
+    """
+    settings.require("classifier_model", "foundry_project_endpoint")
+
+    client = FoundryChatClient(
+        project_endpoint=settings.foundry_project_endpoint,
         model=settings.classifier_model,
-        azure_ad_token_provider=get_bearer_token_provider(DefaultAzureCredential(), _FOUNDRY_SCOPE),
+        credential=DefaultAzureCredential(),
+        allow_preview=True,
     )
-    logger.debug("classifier client: resource=%s model=%s", resource, settings.classifier_model)
+    logger.debug(
+        "classifier client: endpoint=%s model=%s",
+        settings.foundry_project_endpoint,
+        settings.classifier_model,
+    )
     return Agent(
         client=client,
         name=settings.classifier_agent_name,
         instructions=_INSTRUCTIONS,
-        default_options={"max_tokens": 512},
+        # ``response_format`` lives in the defaults, not just the per-call options
+        # in ``classify()``: when the agent is wrapped by a Foundry host server the
+        # container calls ``agent.run(messages)`` directly and never goes through
+        # ``classify()``, so structured output has to be the default behaviour.
+        default_options={"max_tokens": 512, "response_format": Classification},
     )
 
 
-def _prompt(req: ClassifierInput) -> str:
+def build_prompt(req: ClassifierInput) -> str:
+    """The user-turn text for a classification request. Shared by local and remote paths."""
     return f"Channel: {req.channel}\nRequest:\n{req.message_text}"
 
 
 async def classify(agent: Agent, req: ClassifierInput) -> Classification:
     """Run the classifier and return a validated `Classification`.
 
-    Primary path is Claude's native structured output (``response.value``). Falls
-    back to parsing ``response.text`` as JSON, then to one retry, so a transient
-    formatting slip doesn't fail the request.
+    Primary path is the model's native structured output (``response.value``).
+    Falls back to parsing ``response.text`` as JSON, then to one retry, so a
+    transient formatting slip doesn't fail the request.
     """
-    response = await agent.run(_prompt(req), options={"response_format": Classification})
+    response = await agent.run(build_prompt(req), options={"response_format": Classification})
     result: Classification | None = _extract(response)
 
     if result is None:
@@ -63,8 +80,7 @@ async def classify(agent: Agent, req: ClassifierInput) -> Classification:
             "classifier: no structured value and unparseable text for %s; retrying", req.request_id
         )
         retry = await agent.run(
-            _prompt(req) + "\n\nReturn ONLY the JSON object: "
-            '{"category": "...", "confidence": 0.0, "rationale": "..."}',
+            build_prompt(req) + JSON_ONLY_SUFFIX,
             options={"response_format": Classification},
         )
         result = _extract(retry)

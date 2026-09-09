@@ -1,7 +1,9 @@
 # IT Help Desk Agent Assistant — Design Doc
 
-*Living document, updated each phase. Current: Phase 1 (classifier) — built and
-evaluated locally; deploy pending.*
+*Living document, updated each phase. Current: Phase 1 complete — classifier
+(`gpt-4.1-mini` on `FoundryChatClient`) **deployed** as a Foundry hosted agent and
+verified: 100% on the 49-row eval both in-process and through the deployed
+endpoint, 100% local↔remote parity. Next: Phase 2 (KB / Azure AI Search).*
 
 ## 1. Category taxonomy
 - `billing`
@@ -42,9 +44,11 @@ LangGraph orchestrator (hosted agent in Foundry)
 
 **Confirmed:** below-threshold confidence → route to `escalate_human` regardless of category, rather than guessing.
 
-**Phase 1 result:** `confidence_threshold = 0.80`. On a 49-row synthetic labeled set the classifier scored 98% accuracy; every correct prediction had confidence ≥ 0.85, the single misclassification 0.75, and deliberately vague requests < 0.6 — a clean separation at 0.80. Re-tune against real request samples when available.
+**Phase 1 result (`gpt-4.1-mini`):** `confidence_threshold = 0.80`. On the 49-row synthetic labeled set the classifier scores **100%** accuracy, in-process and through the deployed endpoint (100% local↔remote category parity). All correct predictions land ≥ 0.70; the one genuinely ambiguous procurement request (`s14`, "licensed copy of… software approved for my team") is classified correctly at 0.70 and so escalates at threshold 0.80 — the intended behaviour. Both `ambiguous`-flagged rows fall below 0.80. Re-tune against real request samples when available. *(The earlier Haiku build scored 98% at the same threshold; swapped for the reasons below.)*
 
-**Confirmed:** Model = Claude Haiku 4.5, deployed via the Foundry model catalog. Called through Microsoft Agent Framework's **`AnthropicFoundryClient`** (`agent-framework-anthropic`) — *not* `FoundryChatClient`, which targets the Azure-OpenAI-family Responses endpoint. Structured output (`Classification`) works natively via `options={"response_format": ...}`; the JSON schema must be constraint-free (Claude's structured-output validator rejects numeric `minimum`/`maximum`), so bounds are enforced in a Pydantic validator instead. Framework stays Microsoft Agent Framework (not Claude Agent SDK).
+**Confirmed:** Model = **`gpt-4.1-mini`** (Foundry model catalog, portal-managed), called through Microsoft Agent Framework's **`FoundryChatClient`** against the **project endpoint** (OpenAI-family Responses API). *Was* Claude Haiku 4.5 via `AnthropicFoundryClient`; switched after the first deploy — the prerelease `agent-framework-anthropic` + Anthropic-on-Foundry path threw frequent transient `server_error`s in the hosted container, and calling the account-level Anthropic endpoint needed an extra account-scope RBAC grant on the agent identity. `FoundryChatClient` on the project endpoint runs under the agent MI's *implicit* inference access (no grant), shares one client stack with the resolver, and drops a prerelease dep. Structured output (`Classification`) via `response_format`; the JSON schema stays constraint-free (strict structured-output validators — Claude and OpenAI alike — reject numeric `minimum`/`maximum`), so bounds are enforced in a Pydantic validator. Framework stays Microsoft Agent Framework.
+
+**Deployment (Phase 1 deploy).** The classifier ships as a Foundry **Hosted Agent** — `src/helpdesk/agents/classifier/agent.py`'s builder wrapped by `agent-framework-foundry-hosting`'s **`ResponsesHostServer`** (`POST /responses` + `GET /readiness`, port 8088), started via a root `main.py` shim. `azd` code-deploy mode (`azure.yaml` `classifier` service, `dependencyResolution: remote_build`), no Dockerfile. `response_format=Classification` is baked into the agent's `default_options` so structured output holds when the host calls `agent.run()` directly. The orchestrator (and `scripts/verify_deploy.py`) reach it through `agent_gateway.RemoteInvoker`: async httpx POST `{"input": <prompt>, "stream": false}` to `.../agents/helpdesk-classifier/endpoint/protocols/openai/responses`, bearer token scope `https://ai.azure.com/.default`, with JSON-parse + retry-with-backoff (transient `status: failed` and unparseable responses both consume an attempt). App Insights / trace-context propagation is deferred to Phase 4.
 
 ## 4. Resolver Agent — contract
 

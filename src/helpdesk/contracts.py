@@ -51,11 +51,11 @@ class ClassifierInput(BaseModel):
 class Classification(BaseModel):
     """Classifier output — and the model's structured-output schema.
 
-    This model is sent to Claude as an ``output_config.format`` JSON schema.
-    Claude's structured-output validator rejects numeric ``minimum``/``maximum``
-    (and other constraint keywords), so the fields here stay constraint-free at
-    the schema level; ``confidence`` is clamped to [0, 1] after the model
-    responds, and ``rationale`` emptiness is checked in a validator.
+    This model is sent to the model as a structured-output JSON schema. Strict
+    structured-output validators (both Claude and OpenAI-family) reject numeric
+    ``minimum``/``maximum`` and other constraint keywords, so the fields here stay
+    constraint-free at the schema level; ``confidence`` is clamped to [0, 1] after
+    the model responds, and ``rationale`` emptiness is checked in a validator.
     """
 
     model_config = _STRICT

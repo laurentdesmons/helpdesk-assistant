@@ -1,0 +1,37 @@
+# What `azd deploy` must NOT upload into the hosted-agent code package.
+# Keep the zip to source + pyproject + requirements.txt only; deps are installed
+# server-side (dependencyResolution: remote_build).
+
+.venv/
+.git/
+.azure/
+.github/
+.claude/
+
+# not needed at runtime
+eval/
+docs/
+tests/
+scripts/
+infra/
+
+# local artifacts / caches
+.local/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+htmlcov/
+.coverage
+
+# secrets / os
+.env
+*.env
+!.env.example
+.DS_Store
+.idea/
+.vscode/

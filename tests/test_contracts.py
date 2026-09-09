@@ -29,7 +29,7 @@ def test_classification_output_matches_readme_section_3() -> None:
 
 @pytest.mark.parametrize(("raw", "clamped"), [(-0.1, 0.0), (1.1, 1.0), (2.0, 1.0), (0.42, 0.42)])
 def test_classification_confidence_is_clamped(raw: float, clamped: float) -> None:
-    # Schema stays constraint-free for Claude's structured-output validator;
+    # Schema stays constraint-free for strict structured-output validators;
     # out-of-range confidence from the model is clamped, not rejected.
     assert Classification(category=Category.hr, confidence=raw, rationale="x").confidence == clamped
 

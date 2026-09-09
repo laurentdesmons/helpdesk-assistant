@@ -1,0 +1,26 @@
+# Runtime dependencies for the Foundry hosted-agent containers (code deploy mode).
+#
+# `azd deploy` zips this repo (see .azdignore), then runs `pip install -r
+# requirements.txt` server-side. The trailing `.` installs the `helpdesk` package
+# itself from the zipped pyproject.toml (hatchling handles the src/ layout).
+#
+# The agent-framework / agentserver stack is prerelease and version-fragile — pin
+# it exactly to what uv.lock resolved. Keep this in sync with pyproject.toml.
+
+agent-framework==1.17.0
+agent-framework-core==1.17.0
+agent-framework-foundry==1.12.0
+agent-framework-foundry-hosting==1.0.0a260528
+azure-ai-agentserver-core==2.0.0b3
+azure-ai-agentserver-responses==1.0.0b5
+
+azure-ai-projects>=2.2
+azure-identity>=1.17
+pydantic>=2.7
+pydantic-settings>=2.2
+python-dotenv>=1.0
+rich>=13.7
+httpx>=0.27
+opentelemetry-api>=1.24
+
+.

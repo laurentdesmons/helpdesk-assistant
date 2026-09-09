@@ -10,9 +10,9 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Literal
-from urllib.parse import urlparse
+from urllib.parse import urlsplit, urlunsplit
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 AgentMode = Literal["local", "remote", "fake"]
@@ -24,17 +24,31 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
 
     # --- Foundry project (Phase 0.5) --------------------------------------
-    foundry_project_endpoint: str | None = None
+    # The deployed container gets the bare (un-prefixed) ``FOUNDRY_PROJECT_ENDPOINT``
+    # / ``APPLICATIONINSIGHTS_CONNECTION_STRING`` injected by the Foundry runtime;
+    # locally we set the ``HELPDESK_``-prefixed names. An explicit ``validation_alias``
+    # turns off ``env_prefix`` for that field, so the prefixed name is listed too.
+    foundry_project_endpoint: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "HELPDESK_FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_PROJECT_ENDPOINT"
+        ),
+    )
     azure_ai_project_endpoint: str | None = None
-    applicationinsights_connection_string: str | None = None
+    applicationinsights_connection_string: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "HELPDESK_APPLICATIONINSIGHTS_CONNECTION_STRING",
+            "APPLICATIONINSIGHTS_CONNECTION_STRING",
+        ),
+    )
 
-    # --- Classifier: Claude Haiku 4.5 (Phase 1) -------------------------
-    anthropic_foundry_resource: str | None = None
-    anthropic_foundry_api_key: str | None = None
-    classifier_model: str = "claude-haiku-4-5"
+    # --- Classifier: Foundry GPT model via FoundryChatClient (Phase 1) ---
+    classifier_model: str = "gpt-4.1-mini"
 
     # --- Resolver: GPT-5.4-mini (Phase 3) ------------------------------
     resolver_model: str = "gpt-5.4-mini"
@@ -56,6 +70,18 @@ class Settings(BaseSettings):
     resolver_agent_name: str = "helpdesk-resolver"
     orchestrator_agent_name: str = "helpdesk-orchestrator"
 
+    # --- Deployed agent endpoints (Phase 1 deploy) ---------------------
+    # ``azd`` writes ``AGENT_CLASSIFIER_RESPONSES_ENDPOINT`` to the azd env after
+    # deploy; locally, put it in ``.env`` as ``HELPDESK_CLASSIFIER_AGENT_ENDPOINT``.
+    # Left unset, ``classifier_responses_url()`` derives it from the project
+    # endpoint + agent name.
+    classifier_agent_endpoint: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "HELPDESK_CLASSIFIER_AGENT_ENDPOINT", "AGENT_CLASSIFIER_RESPONSES_ENDPOINT"
+        ),
+    )
+
     # --- Behaviour ------------------------------------------------------
     agent_mode: AgentMode = "local"
     classifier_mode: AgentMode | None = None
@@ -70,24 +96,26 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
-    def resolve_anthropic_resource(self) -> str:
-        """The Foundry resource sub-domain for the Anthropic (Claude) endpoint.
+    def classifier_responses_url(self) -> str:
+        """The `POST /responses` URL of the deployed classifier agent.
 
-        Uses ``anthropic_foundry_resource`` when set, otherwise derives it from
-        the host of ``foundry_project_endpoint`` (``https://<resource>.services.
-        ai.azure.com/...`` -> ``<resource>``). The deployed container only gets
-        ``FOUNDRY_PROJECT_ENDPOINT`` injected, so the derivation keeps the agent
-        working without an extra env var.
+        Prefers ``classifier_agent_endpoint`` — which ``azd`` writes to the env as
+        ``AGENT_CLASSIFIER_RESPONSES_ENDPOINT`` already fully-formed (with its
+        ``?api-version`` query). Only a bare agent base URL gets ``/responses``
+        appended. Falls back to deriving from the project endpoint + agent name.
         """
-        if self.anthropic_foundry_resource:
-            return self.anthropic_foundry_resource
-        if self.foundry_project_endpoint:
-            host = urlparse(self.foundry_project_endpoint).hostname or ""
-            if host.endswith(".services.ai.azure.com"):
-                return host.split(".", 1)[0]
-        raise RuntimeError(
-            "Cannot resolve the Anthropic Foundry resource. Set "
-            "HELPDESK_ANTHROPIC_FOUNDRY_RESOURCE or HELPDESK_FOUNDRY_PROJECT_ENDPOINT."
+        if self.classifier_agent_endpoint:
+            parts = urlsplit(self.classifier_agent_endpoint)
+            path = parts.path.rstrip("/")
+            if not path.endswith("/responses"):
+                path = f"{path}/responses"
+            return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+        self.require("foundry_project_endpoint")
+        assert self.foundry_project_endpoint is not None  # narrowed by require()
+        project = self.foundry_project_endpoint.rstrip("/")
+        return (
+            f"{project}/agents/{self.classifier_agent_name}"
+            "/endpoint/protocols/openai/responses?api-version=v1"
         )
 
     def mode_for(self, agent: Literal["classifier", "resolver"]) -> AgentMode:

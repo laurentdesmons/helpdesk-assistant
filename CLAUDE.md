@@ -14,17 +14,27 @@ IT Help Desk Agent Assistant. LangGraph orchestrator + two Microsoft Agent Frame
 **Done:**
 - Phase 0 — scaffold, contracts, config, logging, JSON escalation store, tests.
 - Phase 0.5 — Foundry project `helpdesk-dev` in **eastus2** (account
-  `cog-isvx3zxptjnfy`), `azd` env `helpdesk-dev`. Deployed models:
-  `claude-haiku-4-5`. `.env` populated (App Insights + judge + resolver models
-  still pending). Your account has the **Foundry User** data-plane role.
-- Phase 1 (local) — classifier agent (`AnthropicFoundryClient` + structured
-  output), `agent_gateway` local/fake paths, `scripts/run_local_classifier.py`,
-  50-row eval set, `eval/classifier_eval.py`. **98% accuracy**, threshold tuned
-  to **0.80**.
+  `cog-isvx3zxptjnfy`), `azd` env `helpdesk-dev`. `.env` populated (App Insights +
+  judge still pending). Your account is **Owner** + **Foundry User** at account
+  scope (auto-granted at project creation).
+- Phase 1 — classifier agent + structured output, `agent_gateway`
+  local/fake/remote paths, `scripts/run_local_classifier.py`, 50-row eval set,
+  `eval/classifier_eval.py`. **`gpt-4.1-mini` on `FoundryChatClient`**, threshold
+  **0.80**, **100%** on the 49-row set. (First deploy used Claude Haiku via
+  `AnthropicFoundryClient` — frequent transient `server_error`s in the hosted
+  container on the prerelease Anthropic-on-Foundry path + an account-scope RBAC
+  grant on the agent MI; swapped to gpt-4.1-mini on the project endpoint: agent MI
+  implicit access, one client stack with the resolver, no flakiness.)
+- Phase 1 deploy — **`helpdesk-classifier` deployed and verified.** `host.py`
+  (`ResponsesHostServer`) + root `main.py` shim, `classifier` service in
+  `azure.yaml` (`azd` code-deploy, `remote_build`, `entryPoint: main.py`),
+  `RemoteInvoker` (httpx to `.../protocols/openai/responses` + retry/backoff),
+  `scripts/verify_deploy.py`, `requirements.txt` + `.azdignore`. Remote eval 100%,
+  100% local↔remote parity. Hosted-call latency ~15–18s (cross-region eastus2↔SEA
+  + per-call session sandbox) — functional, revisit if it matters.
 
-**Next:** Phase 1 deploy (1e/1f) — `agents/classifier/host.py`, an
-`azure.ai.agent` service in `azure.yaml`, `azd deploy`, wire `RemoteInvoker`,
-`scripts/verify_deploy.py`. Then Phase 2 (KB/Search).
+**Next:** Phase 2 — KB / Azure AI Search (`support-index`, `hr-index` from
+`docs/`). Then Phase 3 resolver.
 
 **Not committed yet** — all work is untracked on `main`.
 
@@ -39,15 +49,24 @@ IT Help Desk Agent Assistant. LangGraph orchestrator + two Microsoft Agent Frame
   (`build_*_agent(settings)`) must be pure constructors.
 - Run everything locally with rich logs before deploying. Deploy agents one at a
   time: classifier → resolver → orchestrator, verifying each.
-- Do not deploy without `eval/run_all.py` passing (from Phase 4.5).
+- Deploy gate: `eval/run_all.py` (Phase 4.5) once it exists. Until then the
+  interim gate is `python -m eval.classifier_eval --gate --min-accuracy 0.94`
+  locally (live model) before deploy, then `HELPDESK_CLASSIFIER_MODE=remote ...
+  --gate --min-accuracy 0.90 --compare <local report>` after deploy (parity must
+  stay ≥ 95%). gpt-4.1-mini currently scores 100% both ways.
 
 ## Layout
 
 - `src/helpdesk/` shared lib: `contracts`, `config`, `logging`, `tracing` (P4),
   `agent_gateway` (P1), `escalation`, `search/` (P2).
-- `agents/{classifier,resolver,orchestrator}/` — one independently deployable `azd`
-  agent each (`agent.py` builder, `host.py` entrypoint, `manifest.yaml`,
-  `Dockerfile`, `requirements.txt`).
+- `src/helpdesk/agents/{classifier,resolver,orchestrator}/` — one independently
+  deployable agent each: `agent.py` (pure builder + run helpers), `host.py`
+  (`*HostServer` entrypoint), `instructions.md`. (Namespaced under `helpdesk` to
+  avoid colliding with the installed top-level `agents` package.)
+- `main.py` (repo root) — the `codeConfiguration.entryPoint` shim for `azd`
+  code-deploy; delegates to the classifier host today.
+- `requirements.txt` + `.azdignore` (repo root) — runtime deps + upload excludes
+  for `azd deploy` (code mode, `dependencyResolution: remote_build`).
 - `eval/` datasets + evaluators (code-based for classifier, Foundry RAG/agent
   evaluators for resolver). Gated; needs live models (`RUN_LIVE_EVAL=1`).
 - `scripts/` local drivers with rich logging.
@@ -62,9 +81,10 @@ IT Help Desk Agent Assistant. LangGraph orchestrator + two Microsoft Agent Frame
 `HELPDESK_AGENT_MODE`) = `local` | `remote` | `fake`:
 
 - **local**: classifier & resolver run in-process as MAF `Agent` objects.
-- **remote**: orchestrator calls the deployed Foundry agents via
-  `AgentServiceFactory.get_agent_node` (fallback: raw httpx to the Responses
-  endpoint with an injected `traceparent`).
+- **remote**: `RemoteInvoker` calls the deployed Foundry agents by raw async
+  httpx POST to each agent's `.../endpoint/protocols/openai/responses` URL, with a
+  `DefaultAzureCredential` bearer token (scope `https://ai.azure.com/.default`).
+  Phase 4 may switch to `langchain-azure-ai`'s agent node and inject `traceparent`.
 - **fake**: deterministic stubs for `tests/`.
 
 The LangGraph graph topology is identical in all modes. Per-agent overrides:
@@ -72,10 +92,12 @@ The LangGraph graph topology is identical in all modes. Per-agent overrides:
 
 ## Models
 
-- **Classifier**: Claude Haiku 4.5 (Foundry model catalog) via MAF
-  `AnthropicFoundryClient` (`agent-framework-anthropic`, prerelease). Structured
-  output = `Classification`; if native structured output doesn't work through
-  Foundry, fall back to prompt-based JSON + Pydantic validation + one retry.
+- **Classifier**: `gpt-4.1-mini` (Foundry model catalog, portal-managed) via MAF
+  `FoundryChatClient` against the **project endpoint**. Structured output =
+  `Classification` via `response_format` (baked into the agent `default_options`
+  so the hosted `agent.run()` uses it); falls back to prompt-based JSON + Pydantic
+  validation + retry. (Was Claude Haiku 4.5 / `AnthropicFoundryClient` — swapped in
+  Phase 1 deploy for transient-error and RBAC reasons; see Status.)
 - **Resolver**: GPT-5.4-mini (fallback `gpt-5-mini`) via `FoundryChatClient`.
   Retrieval is a custom `@ai_function` `search_knowledge_base` tool (NOT the context
   provider, NOT the hosted search tool) so tool-call spans + explicit context feed
@@ -122,19 +144,28 @@ python scripts/verify_trace_propagation.py       # assert one correlated trace
 
 ## Deployment (azd, one agent at a time)
 
+Unified `azure.yaml` model (one file, an `azure.ai.agent` service per agent — no
+separate `manifest.yaml`/`agent.yaml`). Code-deploy mode, `remote_build`.
+
 ```
-azd ext install microsoft.foundry               # once (older alias: azure.ai.agents)
-azd ai agent init -m agents/<name>/manifest.yaml --deploy-mode code
-azd ai agent run                                 # local host :8088
-azd ai agent invoke --local '<json>'
-azd provision                                    # first time only (generated infra/)
-azd deploy                                       # single service
-azd ai agent monitor --follow                    # stream container logs
+azd ext install azure.ai.agents                  # (+ azure.ai.projects)
+azd env select helpdesk-dev
+azd env set HELPDESK_CLASSIFIER_MODEL gpt-4.1-mini
+python -m helpdesk.agents.classifier.host         # raw local host :8088
+azd ai agent run                                  # local host via startupCommand
+azd ai agent monitor classifier --follow          # stream logs (needs a session id or --follow)
+azd provision --preview  &&  azd provision        # connects to existing helpdesk-dev
+azd deploy classifier                             # single service
+python scripts/verify_deploy.py classifier        # post-deploy smoke test
 ```
 
 Order: classifier, then resolver, then orchestrator. Verify each before the next.
-Runtime injects `FOUNDRY_PROJECT_ENDPOINT`, `AZURE_AI_MODEL_DEPLOYMENT_NAME`,
-`APPLICATIONINSIGHTS_CONNECTION_STRING`.
+Your account is Owner + Foundry User; the deployed agent's MI has implicit
+project-endpoint inference access, so with `FoundryChatClient` (project endpoint)
+no RBAC grant is needed. Runtime injects `FOUNDRY_PROJECT_ENDPOINT` and
+`APPLICATIONINSIGHTS_CONNECTION_STRING` (un-prefixed
+— `Settings` bridges them via `AliasChoices`); pass everything else through
+`azure.yaml` `env:`.
 
 ## Tracing
 

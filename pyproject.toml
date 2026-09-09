@@ -10,16 +10,23 @@ dependencies = [
     "rich>=13.7",
     "filelock>=3.13",
     "opentelemetry-api>=1.24",
-    # --- Phase 1: classifier ---
+    "httpx>=0.27",
+    # --- Phase 1: classifier (Foundry GPT model via FoundryChatClient) ---
     "agent-framework",
-    "agent-framework-anthropic",           # pre-release — AnthropicFoundryClient
+    "agent-framework-foundry",             # FoundryChatClient
+    "azure-ai-projects>=2.2",
     "azure-identity>=1.17",
+    # --- Phase 1 deploy: classifier as a Foundry hosted agent ---
+    "agent-framework-foundry-hosting",     # pre-release — ResponsesHostServer
     # Added in later phases:
-    #   Phase 1 deploy: agent-framework-foundry-hosting (--pre)
-    #   Phase 2: azure-search-documents>=11.5,<11.6, azure-ai-projects
-    #   Phase 3: agent-framework-foundry, azure-ai-evaluation
-    #   Phase 4: langgraph, langchain-azure-ai[tools,opentelemetry], azure-monitor-*
+    #   Phase 2: azure-search-documents>=11.5,<11.6
+    #   Phase 3: azure-ai-evaluation
+    #   Phase 4: langgraph, langchain-azure-ai[tools,opentelemetry],
+    #            azure-monitor-opentelemetry-exporter (App Insights span export)
 ]
+
+[project.scripts]
+helpdesk-classifier-host = "helpdesk.agents.classifier.host:main"
 
 [project.optional-dependencies]
 dev = [
@@ -35,7 +42,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.uv]
-# agent-framework-anthropic (and -foundry-hosting) are published as pre-releases.
+# agent-framework-foundry-hosting is published as a pre-release.
 prerelease = "allow"
 
 [tool.hatch.build.targets.wheel]
@@ -60,3 +67,14 @@ packages = ["helpdesk"]
 mypy_path = "src"
 strict = true
 warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["agent_framework_foundry_hosting.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# numpy (transitive via azure-ai-projects) ships 3.12+ syntax in its stubs that
+# trips mypy pinned to 3.11; we don't call numpy directly.
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
