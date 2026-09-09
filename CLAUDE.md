@@ -33,8 +33,27 @@ IT Help Desk Agent Assistant. LangGraph orchestrator + two Microsoft Agent Frame
   100% local↔remote parity. Hosted-call latency ~15–18s (cross-region eastus2↔SEA
   + per-call session sandbox) — functional, revisit if it matters.
 
-**Next:** Phase 2 — KB / Azure AI Search (`support-index`, `hr-index` from
-`docs/`). Then Phase 3 resolver.
+- Phase 2 — **KB / Azure AI Search layer built and verified end-to-end.**
+  `src/helpdesk/search/` (`chunking` pure H2-splitter, `embeddings` =
+  `text-embedding-3-small`/1536-d on the account-level `/openai/v1`, `index`
+  schema/lifecycle, `client` `KnowledgeBaseSearch.search()` = the Phase 3 seam,
+  `pipeline` push-model build). `scripts/build_kb.py` (`--recreate` / `--dry-run`
+  / `--category`), `scripts/search_kb.py` (manual query tool). Two indexes
+  `support-index` / `hr-index` (`Settings.index_for`; billing → `ValueError`),
+  24 chunks (12+12). Hybrid + semantic ranker (`search_query_type`). Hermetic
+  `tests/test_chunking.py` + `tests/test_search_config.py`. **Verified** —
+  `build_kb.py --recreate` populated both indexes on
+  `srch-helpdesk-dev-isvx3zxptjnfy` (Basic, free semantic ranker, AAD auth); all
+  six spot queries hit the right doc/section (reranker 2.2–3.1); billing → clean
+  `ValueError`; re-run idempotent. Deps: `azure-search-documents>=12.1.0b2` +
+  `openai` (local/dev only — `requirements.txt` untouched; the resolver container
+  picks them up in Phase 3).
+  - **Gotcha:** `text-embedding-3-small` also had a ~50-min post-deploy window
+    where the data plane 404'd `DeploymentNotFound` on every route while ARM said
+    `Succeeded`; it cleared on its own (no recreate needed).
+
+**Next:** Phase 3 — resolver agent (GPT-5.4-mini) wrapping
+`KnowledgeBaseSearch.search()` in an `@ai_function` tool.
 
 **Not committed yet** — all work is untracked on `main`.
 
@@ -98,6 +117,13 @@ The LangGraph graph topology is identical in all modes. Per-agent overrides:
   so the hosted `agent.run()` uses it); falls back to prompt-based JSON + Pydantic
   validation + retry. (Was Claude Haiku 4.5 / `AnthropicFoundryClient` — swapped in
   Phase 1 deploy for transient-error and RBAC reasons; see Status.)
+- **Embeddings** (Phase 2): `text-embedding-3-small` (1536-d), portal-managed on
+  the Foundry project. Called via `AIProjectClient.get_openai_client(base_url=…)`
+  pointed at the **account-level** `https://<acct>.services.ai.azure.com/openai/v1`
+  — the project-scoped `.../api/projects/<proj>/openai/v1` passthrough proxies
+  chat/responses but **NOT `/embeddings`** (bare 404). `search/embeddings.py`
+  `_account_openai_v1_url()` derives it from `foundry_project_endpoint`. `-small`
+  chosen for the small flat KB; revisit `-large` for the real corpus.
 - **Resolver**: GPT-5.4-mini (fallback `gpt-5-mini`) via `FoundryChatClient`.
   Retrieval is a custom `@ai_function` `search_knowledge_base` tool (NOT the context
   provider, NOT the hosted search tool) so tool-call spans + explicit context feed
@@ -122,9 +148,19 @@ prod).
 ## KB / search
 
 Two indexes: `support-index`, `hr-index`, built from `docs/` frontmatter
-`category`. Chunked at H2 sections. Mode: semantic (hybrid vector+keyword +
-semantic ranker). Agentic / Knowledge Base mode is a flag (`Settings.agentic_search`)
-for when the real KB arrives. Build: `python scripts/build_kb.py --recreate`.
+`category` (`Settings.index_for`; billing has no index → `ValueError`). Chunked at
+H2 sections (`src/helpdesk/search/chunking.py`, pure). **Push model** — embed
+locally with `text-embedding-3-small` (1536-d, `Settings.embedding_model` /
+`embedding_dimensions`) via the project OpenAI endpoint, `merge_or_upload` whole
+docs with vectors; no indexer/skillset. Query = hybrid vector+keyword + semantic
+ranker (`Settings.search_query_type` = `vector_semantic_hybrid` | `vector_hybrid`
+| `keyword`). `KnowledgeBaseSearch.search(category, query)` (`search/client.py`)
+is the Phase 3 resolver seam; `SearchResult.to_citation()` → `contracts.Citation`.
+Agentic / Knowledge Base mode is a flag (`Settings.agentic_search`) for when the
+real KB arrives. Build: `python scripts/build_kb.py --recreate`
+(`--dry-run` chunks only, no network). Query: `python scripts/search_kb.py
+--category support --query "..."`. Re-evaluate `-large` + integrated vectorization
+when the real KB lands.
 
 ## Common commands
 
@@ -136,7 +172,8 @@ az login  /  azd auth login                     # auth (DefaultAzureCredential)
 python scripts/run_local_classifier.py --message "..."
 python scripts/run_local_resolver.py --category support --message "..."
 python scripts/run_local_graph.py --message "..." [--mode local|remote]
-python scripts/build_kb.py --recreate           # build search indexes
+python scripts/build_kb.py --recreate           # build search indexes (--dry-run: chunk only)
+python scripts/search_kb.py --category support --query "vpn drops"   # manual KB query
 RUN_LIVE_EVAL=1 python -m eval.run_all           # full eval gate (slow, live models)
 python scripts/verify_deploy.py <agent>          # post-deploy smoke test
 python scripts/verify_trace_propagation.py       # assert one correlated trace

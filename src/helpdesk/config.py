@@ -59,9 +59,17 @@ class Settings(BaseSettings):
 
     # --- Azure AI Search (Phase 2) ------------------------------------
     search_endpoint: str | None = None
-    embedding_model: str = "text-embedding-3-large"
+    # -small (1536-d) is ample for the small, flat, lexically-distinct KB; the
+    # hybrid + semantic ranker carries retrieval. Re-evaluate -large when the
+    # real (larger, multi-section) KB replaces the placeholder docs.
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dimensions: int = 1536
     support_index: str = "support-index"
     hr_index: str = "hr-index"
+    search_semantic_config: str = "helpdesk-semantic"
+    search_top_k: int = 4
+    # vector_semantic_hybrid (default) | vector_hybrid | keyword — lets eval
+    # ablate the retrieval stack.
     search_query_type: str = "vector_semantic_hybrid"
     agentic_search: bool = False
 
@@ -117,6 +125,17 @@ class Settings(BaseSettings):
             f"{project}/agents/{self.classifier_agent_name}"
             "/endpoint/protocols/openai/responses?api-version=v1"
         )
+
+    def index_for(self, category: str) -> str:
+        """Search index name for a category. ``billing`` has no KB — it escalates."""
+        mapping = {"support": self.support_index, "hr": self.hr_index}
+        try:
+            return mapping[str(category)]
+        except KeyError:
+            raise ValueError(
+                f"no knowledge-base index for category {category!r}; "
+                "billing requests escalate rather than retrieve"
+            ) from None
 
     def mode_for(self, agent: Literal["classifier", "resolver"]) -> AgentMode:
         """Effective mode for one agent — per-agent override falls back to ``agent_mode``."""

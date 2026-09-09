@@ -18,8 +18,11 @@ dependencies = [
     "azure-identity>=1.17",
     # --- Phase 1 deploy: classifier as a Foundry hosted agent ---
     "agent-framework-foundry-hosting",     # pre-release — ResponsesHostServer
+    # --- Phase 2: KB / Azure AI Search (local build + query only; the resolver
+    #     container picks these up in Phase 3 via requirements.txt) ---
+    "azure-search-documents>=12.1.0b2",    # pre-release — vector + semantic hybrid
+    "openai>=1.40",                        # embeddings via AIProjectClient.get_openai_client()
     # Added in later phases:
-    #   Phase 2: azure-search-documents>=11.5,<11.6
     #   Phase 3: azure-ai-evaluation
     #   Phase 4: langgraph, langchain-azure-ai[tools,opentelemetry],
     #            azure-monitor-opentelemetry-exporter (App Insights span export)

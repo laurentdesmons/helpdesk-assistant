@@ -1,9 +1,14 @@
 # IT Help Desk Agent Assistant — Design Doc
 
-*Living document, updated each phase. Current: Phase 1 complete — classifier
-(`gpt-4.1-mini` on `FoundryChatClient`) **deployed** as a Foundry hosted agent and
-verified: 100% on the 49-row eval both in-process and through the deployed
-endpoint, 100% local↔remote parity. Next: Phase 2 (KB / Azure AI Search).*
+*Living document, updated each phase. Current: Phase 2 complete — KB / Azure AI
+Search layer built and **verified end-to-end** (`src/helpdesk/search/`,
+`scripts/build_kb.py`, `scripts/search_kb.py`, hermetic chunking tests).
+Chunk-at-H2 → 24 chunks, two push-model indexes (`support-index`, `hr-index`),
+`text-embedding-3-small` (1536-d), hybrid + semantic ranker. Search service
+provisioned manually; `build_kb.py --recreate` populated both indexes and all
+spot queries land on the right doc/section. Previous: Phase 1 — classifier
+(`gpt-4.1-mini` on `FoundryChatClient`) **deployed** and verified 100% both ways.
+Next: Phase 3 (resolver).*
 
 ## 1. Category taxonomy
 - `billing`
@@ -86,16 +91,52 @@ LangGraph orchestrator (hosted agent in Foundry)
 
 ## 5. KB / grounding design (Azure AI Search)
 
-Two supported modes via the `agent-framework-azure-ai-search` context provider (currently pre-release/`--pre`):
-- **Semantic mode**: hybrid (vector + keyword) search with semantic ranking. Simpler, GA-track, good fit if policy docs are relatively flat/short.
-- **Agentic mode**: multi-hop reasoning over Knowledge Bases for complex queries. Higher latency/cost, better for multi-document synthesis.
+**Phase 2 build (`src/helpdesk/search/`).** A custom, push-model retrieval layer —
+*not* the `agent-framework-azure-ai-search` context provider and not the hosted
+search tool (the Phase 3 resolver wraps `KnowledgeBaseSearch.search()` in its own
+`@ai_function` so tool-call spans + explicit context feed the evaluators).
 
-**Sample content:** placeholder KB docs provided (`sample-kb/support/`, `sample-kb/hr/`) — fictional, generic content for Phase 1 build/test only. Not real company policy. Must be swapped for actual documents before production.
+- **Chunking** (`chunking.py`, pure): each `docs/*.md` file → one chunk per `## `
+  section, frontmatter `category` picks the index. Placeholder corpus = 6 docs ×
+  4 sections = **24 chunks** (12 support + 12 hr). Sections are short and
+  self-contained, so H2 is the natural retrieval unit.
+- **Two indexes** — `support-index`, `hr-index` (`Settings.index_for()`; `billing`
+  has none, it escalates). Independent permissioning + content lifecycle.
+- **Embeddings** (`embeddings.py`): `text-embedding-3-small` (1536-d) via the
+  **account-level** `https://<acct>.services.ai.azure.com/openai/v1` endpoint —
+  the project-scoped `.../api/projects/<proj>/openai/v1` route proxies
+  chat/responses but not `/embeddings`. `-small` is ample for a small, flat,
+  lexically-distinct KB where the hybrid + semantic ranker carries retrieval;
+  **re-evaluate `text-embedding-3-large` when the real (larger, multi-section,
+  possibly multi-hop) KB replaces the samples.**
+- **Index build** (`pipeline.py` + `scripts/build_kb.py`): chunk → embed locally →
+  `merge_or_upload` whole documents (vectors included). No indexer, no skillset —
+  the corpus embeds in <1s and we want per-chunk logs + `--dry-run`. **Revisit
+  integrated vectorization + a scheduled indexer when the real KB is large and
+  frequently updated.**
+- **Query** (`client.py`): HNSW/cosine vector arm + BM25 keyword arm + semantic
+  ranker (`Settings.search_query_type` = `vector_semantic_hybrid` default;
+  `vector_hybrid` / `keyword` for eval ablation). Returns `SearchResult`
+  (→ `contracts.Citation` via `.to_citation()`).
+- **Agentic / Knowledge-Base mode** — still just the `Settings.agentic_search`
+  flag; multi-hop reasoning over Knowledge Bases lands if/when the real KB needs
+  multi-document synthesis.
+- **Provisioning** — manual (consistent with portal-managed models): Azure AI
+  Search **Basic** tier, semantic ranker on the **free** plan, AAD auth
+  (`DefaultAzureCredential`); `text-embedding-3-small` deployed via the portal
+  Model catalog; `Search Service Contributor` + `Search Index Data Contributor`
+  for the dev user; `HELPDESK_SEARCH_ENDPOINT` in `.env`. Phase 3 adds a Foundry
+  connection + `Search Index Data Reader` on the resolver agent MI.
 
-**Still open — needed before real indexing (Phase 2/3):**
+**Sample content:** placeholder KB docs (`docs/`) — fictional, generic, marked
+`status: SAMPLE PLACEHOLDER`. Not real policy. Swapped for actual documents
+before production; those only validate pipeline mechanics.
+
+**Still open — needed before real indexing:**
 - Real policy/KB documents: format (PDF, Word, HTML, Confluence export)?
-- Approximate volume (# of docs, size) — affects chunking strategy and semantic vs. agentic mode choice.
-- Update frequency — affects whether we need a re-indexing pipeline or one-time load.
+- Approximate volume (# of docs, size) — affects chunking strategy, `-small` vs
+  `-large`, and semantic vs. agentic mode.
+- Update frequency — push rebuild vs. integrated vectorization + scheduled indexer.
 
 ## 6. Escalation state schema (draft)
 
