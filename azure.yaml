@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+#
+# Single azd project manifest for the IT Help Desk Agent Assistant.
+# "Accept the azd scaffold": we hand-write this file in the documented Foundry
+# schema and let azd synthesize the infrastructure (bicep-less by default — no
+# infra/ folder). https://learn.microsoft.com/azure/foundry/agents/concepts/azure-yaml-reference
+#
+# Phase 0.5 declares only the empty Foundry project (App Insights + registry come
+# with it). Model deployments and agent services are added as each phase needs them:
+#   Phase 1 -> helpdesk-classifier agent          (model: claude-haiku-4-5, portal)
+#   Phase 3 -> helpdesk-resolver agent + gpt-5.4-mini deployment (added here)
+#   Phase 4 -> helpdesk-orchestrator agent
+#
+# Claude Haiku 4.5 (classifier) and the eval judge (claude-sonnet-5) are deployed
+# via the Foundry portal Model catalog — Models-as-a-Service deployments with a
+# hosting-option choice the portal walks you through. Once deployed, azd
+# references them by deployment name; nothing else is needed here.
+
+requiredVersions:
+  azd: ">=1.27.1"
+  extensions:
+    azure.ai.agents: ">=1.0.0-beta.9"
+    azure.ai.projects: ">=1.0.0-beta.4"
+
+name: helpdesk-assistant
+
+services:
+  ai-project:
+    host: azure.ai.project
+    # No model deployments yet — added in Phase 3:
+    #   deployments:
+    #     - name: gpt-5.4-mini
+    #       model: { format: OpenAI, name: gpt-5.4-mini, version: "2026-03-17" }
+    #       sku:   { name: GlobalStandard, capacity: 10 }
+
+infra:
+  provider: microsoft.foundry

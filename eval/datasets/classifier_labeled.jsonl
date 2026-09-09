@@ -1,0 +1,51 @@
+{"request_id": "b01", "channel": "email", "message_text": "I was charged twice for my subscription this month, please refund the duplicate.", "expected_category": "billing"}
+{"request_id": "b02", "channel": "portal", "message_text": "Our latest invoice shows 20 licenses but we only have 15 people. Can you correct it?", "expected_category": "billing"}
+{"request_id": "b03", "channel": "email", "message_text": "We want to upgrade from the Team plan to the Enterprise plan starting next month.", "expected_category": "billing"}
+{"request_id": "b04", "channel": "teams", "message_text": "The credit card on file was declined and now the account is past due. How do I update payment?", "expected_category": "billing"}
+{"request_id": "b05", "channel": "portal", "message_text": "Please cancel my subscription and stop all future billing.", "expected_category": "billing"}
+{"request_id": "b06", "channel": "email", "message_text": "Can you send me a copy of all invoices from Q1 for our finance audit?", "expected_category": "billing"}
+{"request_id": "b07", "channel": "portal", "message_text": "We need to add 5 more paid seats to our workspace.", "expected_category": "billing"}
+{"request_id": "b08", "channel": "email", "message_text": "I was promised a 10% discount on renewal but the invoice shows full price.", "expected_category": "billing"}
+{"request_id": "b09", "channel": "teams", "message_text": "Why was I billed in USD when our contract is in EUR?", "expected_category": "billing"}
+{"request_id": "b10", "channel": "portal", "message_text": "Requesting a purchase order for the annual renewal so procurement can approve it.", "expected_category": "billing"}
+{"request_id": "b11", "channel": "email", "message_text": "We need to renew the Adobe Creative Cloud contract before it lapses next week.", "expected_category": "billing"}
+{"request_id": "b12", "channel": "email", "message_text": "There is a mystery $49 charge on our account this month that we do not recognize.", "expected_category": "billing"}
+{"request_id": "b13", "channel": "portal", "message_text": "Downgrade us to the free tier at the end of the current billing period.", "expected_category": "billing"}
+{"request_id": "b14", "channel": "email", "message_text": "Can we switch from monthly to annual billing to get the annual discount?", "expected_category": "billing"}
+{"request_id": "b15", "channel": "teams", "message_text": "The vendor sent a quote for extra storage capacity - who approves that spend?", "expected_category": "billing"}
+{"request_id": "b16", "channel": "portal", "message_text": "Refund request: we were double-billed after the plan change on the 3rd.", "expected_category": "billing"}
+{"request_id": "s01", "channel": "teams", "message_text": "I can't log in to my email, it keeps saying my password is wrong even though I just reset it.", "expected_category": "support"}
+{"request_id": "s02", "channel": "portal", "message_text": "The VPN keeps dropping every few minutes when I work from home.", "expected_category": "support"}
+{"request_id": "s03", "channel": "email", "message_text": "I need Photoshop installed on my work laptop for a project.", "expected_category": "support"}
+{"request_id": "s04", "channel": "teams", "message_text": "My laptop won't boot, it just shows a black screen with a blinking cursor.", "expected_category": "support"}
+{"request_id": "s05", "channel": "portal", "message_text": "Please reset my password, I'm locked out after too many attempts.", "expected_category": "support"}
+{"request_id": "s06", "channel": "teams", "message_text": "My MFA device broke and I can't approve sign-in prompts anymore.", "expected_category": "support"}
+{"request_id": "s07", "channel": "email", "message_text": "The shared drive M: is not mapping on my machine this morning.", "expected_category": "support"}
+{"request_id": "s08", "channel": "portal", "message_text": "Outlook keeps crashing on startup since the last update.", "expected_category": "support"}
+{"request_id": "s09", "channel": "teams", "message_text": "I need access to the finance SharePoint site for my new role.", "expected_category": "support"}
+{"request_id": "s10", "channel": "email", "message_text": "The office printer on the 3rd floor won't accept print jobs from my laptop.", "expected_category": "support"}
+{"request_id": "s11", "channel": "portal", "message_text": "Can someone set up a new laptop for the contractor starting Monday?", "expected_category": "support"}
+{"request_id": "s12", "channel": "teams", "message_text": "My account seems locked - I can't get into any internal tools since this morning.", "expected_category": "support"}
+{"request_id": "s13", "channel": "email", "message_text": "Wi-Fi in the east conference room has no internet even though it connects.", "expected_category": "support"}
+{"request_id": "s14", "channel": "portal", "message_text": "I need a licensed copy of the statistics software approved for my team.", "expected_category": "support"}
+{"request_id": "s15", "channel": "teams", "message_text": "Getting a certificate error when connecting to the internal wiki.", "expected_category": "support"}
+{"request_id": "s16", "channel": "email", "message_text": "Please help - my external monitor isn't detected after docking.", "expected_category": "support"}
+{"request_id": "s17", "channel": "portal", "message_text": "Requesting admin rights to install a developer tool for local testing.", "expected_category": "support"}
+{"request_id": "h01", "channel": "portal", "message_text": "How many weeks of paid parental leave does a primary caregiver get?", "expected_category": "hr"}
+{"request_id": "h02", "channel": "email", "message_text": "What's the PTO carryover limit into next year?", "expected_category": "hr"}
+{"request_id": "h03", "channel": "teams", "message_text": "I got married last month - how do I add my spouse to my health plan?", "expected_category": "hr"}
+{"request_id": "h04", "channel": "portal", "message_text": "When is open enrollment and what's the deadline to make changes?", "expected_category": "hr"}
+{"request_id": "h05", "channel": "email", "message_text": "How much PTO do I accrue per month as a full-time employee?", "expected_category": "hr"}
+{"request_id": "h06", "channel": "teams", "message_text": "My paycheck this period is about $400 short - who do I talk to?", "expected_category": "hr"}
+{"request_id": "h07", "channel": "portal", "message_text": "I need a leave confirmation letter with exact dates for my mortgage application.", "expected_category": "hr"}
+{"request_id": "h08", "channel": "email", "message_text": "What documentation do I need to submit for a qualifying life event?", "expected_category": "hr"}
+{"request_id": "h09", "channel": "teams", "message_text": "Can I request a phased return to work after my parental leave?", "expected_category": "hr"}
+{"request_id": "h10", "channel": "portal", "message_text": "My role changed to Senior Analyst - who updates my title in the system?", "expected_category": "hr"}
+{"request_id": "h11", "channel": "email", "message_text": "How do I enroll in the dental and vision plans as a new hire?", "expected_category": "hr"}
+{"request_id": "h12", "channel": "teams", "message_text": "Are payroll deductions for the commuter benefit pre-tax or post-tax?", "expected_category": "hr"}
+{"request_id": "h13", "channel": "portal", "message_text": "I need to report a same-day sick absence and log it retroactively.", "expected_category": "hr"}
+{"request_id": "h14", "channel": "email", "message_text": "What's the notice period I need to give before starting planned leave?", "expected_category": "hr"}
+{"request_id": "h15", "channel": "teams", "message_text": "Does unused PTO get paid out if I leave the company?", "expected_category": "hr"}
+{"request_id": "h16", "channel": "portal", "message_text": "I think too much was withheld from my bonus - can someone review my pay stub?", "expected_category": "hr"}
+{"request_id": "x01", "channel": "email", "message_text": "hi", "expected_category": "support", "ambiguous": true}
+{"request_id": "x02", "channel": "portal", "message_text": "It's broken again, same as last time. Please fix.", "expected_category": "support", "ambiguous": true}
