@@ -1,7 +1,11 @@
 # IT Help Desk Agent Assistant — Design Doc
 
-*Living document, updated each phase. Current: Phase 4 — **`helpdesk-orchestrator`
-deployed and verified; trace-context propagation VERIFIED, not assumed.**
+*Living document, updated each phase. Current: Phase 4.5 — **`eval/run_all.py`
+consolidated deploy gate shipped** (one command / one non-zero exit over the
+classifier + resolver + orchestrator code-based suites; `--remote` for the
+post-deploy parity pass; not wired into `azd`, run by hand; see §7). Previous:
+Phase 4 — **`helpdesk-orchestrator` deployed and verified; trace-context
+propagation VERIFIED, not assumed.**
 `src/helpdesk/agents/orchestrator/` = `graph.py` (`classify → route → resolve |
 escalate_low_confidence → finalize`, pure `build_graph(settings, invoker=…)` +
 `run_graph`) + `host.py` (a `SupportsAgentRun` shim over the compiled graph for
@@ -16,8 +20,7 @@ scenario set, `verify_deploy.py orchestrator`, `scripts/verify_trace_propagation
 it. **100% outcome accuracy on the scenario set (fake + in-process); 100%
 local↔remote parity (14/14); `verify_deploy.py orchestrator` 5/5 through the
 deployed graph; one correlated App Insights trace spans orchestrator → classifier
-+ resolver.** Previous: Phase 3 — `helpdesk-resolver` deployed. Next: Phase 4.5
-(`eval/run_all.py` gate), then Phase 5 (durable escalation queue).*
++ resolver.** Next: Phase 5 (durable escalation queue + review UI).*
 
 ## 1. Category taxonomy
 - `billing`
@@ -195,6 +198,21 @@ blocking gap). Foundry built-in RAG/agent evaluators, for when that lands:
 - Relevance (response addresses the query)
 - Retrieval Quality (isolates retrieval failures from generation failures)
 - Tool Call Accuracy / Tool Output Utilization (resolver calls Azure AI Search as a tool)
+
+**Consolidated gate (Phase 4.5) — `eval/run_all.py`.** One command, one non-zero
+exit over all three code-based suites (`classifier_eval` → `resolver_eval` →
+`orchestrator_eval`). It subprocesses each suite's own `--gate` mode, streams
+their output, reads back the `.local/eval/` JSON reports, prints a PASS/FAIL
+summary and writes `.local/eval/run_all_<stamp>.json`. Run
+`uv run python -m eval.run_all` before every `azd deploy` (local, live models),
+and `uv run python -m eval.run_all --remote` after — the latter points the
+classifier + resolver at the deployed agents, relaxes the accuracy floors, and
+`--compare`s each suite against its newest local report for the ≥ 95% parity
+check. `--only` subsets the suites; `--min-*` overrides a threshold. It is **not**
+wired into `azd` (no predeploy hook) and there is no CI yet — both deliberate;
+the runner is structured so a future workflow can call it unchanged. Foundry
+cloud evaluators as a pre-deploy gate + Azure Monitor quality alerts remain
+future work (blocked on the real-KB groundedness set below).
 
 **Judge model — do not use mini-tier.** Microsoft's own internal evaluator-quality study found Groundedness has a real score-quality gap by judge tier and that smaller judges produce worse scores, not a fixable problem, unlike the other evaluators tested. Use Sonnet 5 or full GPT-5 as the judge, independent of what model the resolver itself runs on.
 

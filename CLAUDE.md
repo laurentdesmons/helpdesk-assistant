@@ -130,9 +130,20 @@ IT Help Desk Agent Assistant. LangGraph orchestrator + two Microsoft Agent Frame
     the orchestrator's node spans, the classifier's `chat gpt-4.1-mini`, and the
     resolver's `chat gpt-5.4-mini` + `execute_tool search_knowledge_base`.
 
-**Next:** Phase 4.5 — `eval/run_all.py` (one gate over classifier + resolver +
-orchestrator evals, non-zero exit, pre-`azd deploy` + CI). Then Phase 5 —
-durable escalation store (Azure Table) + review UI.
+- Phase 4.5 — **`eval/run_all.py` consolidated deploy gate.** One command, one
+  exit code over all three code-based suites (`classifier_eval` → `resolver_eval`
+  → `orchestrator_eval`). Subprocesses each suite's own `--gate` mode
+  (`[sys.executable, "-m", "eval.<suite>", …]`), streams their rich output, reads
+  back the `.local/eval/<suite>_*.json` reports, prints a PASS/FAIL summary +
+  writes `.local/eval/run_all_<stamp>.json`, exits non-zero if any suite fails or
+  wrote no fresh report. `--only classifier,resolver,orchestrator` subsets;
+  `--remote` sets `HELPDESK_{CLASSIFIER,RESOLVER}_MODE=remote`, relaxes the
+  accuracy floors (0.90/0.85/0.85), and `--compare`s each suite against its
+  newest prior local report (parity ≥ `--min-parity`, default 0.95); `--min-*`
+  flags override per suite. No metrics of its own — pure orchestration. Not wired
+  into `azd` (no `hooks.predeploy`) — run it by hand pre-deploy. No CI yet.
+
+**Next:** Phase 5 — durable escalation store (Azure Table) + review UI.
 
 ## Golden rules
 
@@ -150,9 +161,12 @@ durable escalation store (Azure Table) + review UI.
   (`build_*_agent(settings)`) must be pure constructors.
 - Run everything locally with rich logs before deploying. Deploy agents one at a
   time: classifier → resolver → orchestrator, verifying each.
-- Deploy gate: `eval/run_all.py` (Phase 4.5) once it exists. Until then the
-  interim gates are per-agent, run locally (live model) before deploy and in
-  `remote` mode after:
+- Deploy gate: **`uv run python -m eval.run_all`** before every `azd deploy`
+  (local, live models), then **`uv run python -m eval.run_all --remote`** after
+  (graph in-process, agents deployed — the parity pass). One non-zero exit gates
+  all three suites. Post-deploy, also run `verify_deploy.py <agent>` and
+  `verify_trace_propagation.py`. To debug one suite in isolation, run it directly
+  (`run_all` just wraps these):
   - classifier — `uv run python -m eval.classifier_eval --gate --min-accuracy 0.94`,
     then `HELPDESK_CLASSIFIER_MODE=remote ... --gate --min-accuracy 0.90 --compare
     <local report>` (parity ≥ 95%). gpt-4.1-mini scores 100% both ways.
@@ -190,7 +204,8 @@ durable escalation store (Azure Table) + review UI.
   orchestrator alike; the resolver's `--judge` groundedness path is scaffolded
   behind `azure-ai-evaluation` in the `[eval]` extra, off by default).
   `orchestrator_eval.py` runs each scenario through the whole graph and writes
-  escalation records to a throwaway store.
+  escalation records to a throwaway store. `run_all.py` (P4.5) is the consolidated
+  deploy gate — subprocesses all three suites, one non-zero exit.
 - `scripts/` local drivers with rich logging.
 - `docs/` sample KB — **SAMPLE PLACEHOLDER content, pipeline testing only, NOT real
   policy.** Real KB replaces this before production.
@@ -299,7 +314,8 @@ uv run python scripts/run_local_graph.py --message "..." [--mode local|remote|fa
 uv run python -m eval.orchestrator_eval --gate    # end-to-end routing matrix
 uv run python scripts/build_kb.py --recreate      # build search indexes (--dry-run: chunk only)
 uv run python scripts/search_kb.py --category support --query "vpn drops"   # manual KB query
-RUN_LIVE_EVAL=1 uv run python -m eval.run_all      # full eval gate (Phase 4.5 — not yet)
+uv run python -m eval.run_all                     # consolidated deploy gate (pre-deploy, live models)
+uv run python -m eval.run_all --remote            # post-deploy: parity pass vs the local reports
 uv run python scripts/verify_deploy.py <agent>    # post-deploy smoke test (classifier|resolver|orchestrator)
 uv run python scripts/verify_trace_propagation.py # assert one correlated App Insights trace
 ```
