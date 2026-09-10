@@ -114,19 +114,25 @@ def build_graph(settings: Settings, *, invoker: AgentInvoker) -> CompiledGraph:
         if result.outcome == "escalated":
             assert result.escalation_reason is not None  # set by _to_result
             assert result.category is not None
-            await get_escalation_store(settings).record(
-                EscalationRecord(
-                    request_id=result.request_id,
-                    category=result.category,
-                    escalation_reason=result.escalation_reason,
+            try:
+                await get_escalation_store(settings).record(
+                    EscalationRecord(
+                        request_id=result.request_id,
+                        category=result.category,
+                        escalation_reason=result.escalation_reason,
+                    )
                 )
-            )
-            logger.info(
-                "escalation recorded: %s / %s / %s",
-                result.request_id,
-                result.category,
-                result.escalation_reason,
-            )
+                logger.info(
+                    "escalation recorded: %s / %s / %s",
+                    result.request_id,
+                    result.category,
+                    result.escalation_reason,
+                )
+            except Exception:  # noqa: BLE001 — the audit write must not fail the response
+                logger.exception(
+                    "escalation store write failed for %s; returning the result anyway",
+                    result.request_id,
+                )
         return {"result": result}
 
     graph: StateGraph[GraphState, Any, Any, Any] = StateGraph(GraphState)
@@ -201,11 +207,23 @@ async def run_graph(
 
     ``tracer`` — an ``AzureAIOpenTelemetryTracer`` (or any LangChain callback);
     attached per the documented ``config={"callbacks": [...]}`` pattern.
+
+    ``request_id`` goes into OTel baggage for the duration of the run, so the
+    downstream agent calls and any escalation record can be joined to the trace
+    even if span parenting doesn't survive the endpoint hop.
     """
+    from opentelemetry import baggage
+    from opentelemetry import context as otel_context
+
     config: dict[str, Any] = {"configurable": {"thread_id": request.request_id}}
     if tracer is not None:
         config["callbacks"] = [tracer]
-    state = await graph.ainvoke({"request": request}, config)
+
+    token = otel_context.attach(baggage.set_baggage("helpdesk.request_id", request.request_id))
+    try:
+        state = await graph.ainvoke({"request": request}, config)
+    finally:
+        otel_context.detach(token)
     result = state["result"]
     assert isinstance(result, HelpdeskResult)  # every path through finalize sets it
     return result

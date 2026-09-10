@@ -11,12 +11,14 @@ import pytest
 from helpdesk.agent_gateway import (
     FakeInvoker,
     LocalInvoker,
+    OrchestratorClient,
     RemoteInvoker,
     _extract_responses_text,
+    _parse_helpdesk_result,
     build_invoker,
 )
 from helpdesk.config import Settings, get_settings
-from helpdesk.contracts import Category, Classification, ClassifierInput
+from helpdesk.contracts import Category, Classification, ClassifierInput, HelpdeskResult
 
 
 def _req(text: str, rid: str = "t1") -> ClassifierInput:
@@ -260,6 +262,61 @@ async def test_composite_invoker_aclose_closes_both() -> None:
 )
 def test_classifier_responses_url_is_idempotent(endpoint: str, expected: str) -> None:
     assert Settings(_env_file=None, classifier_agent_endpoint=endpoint).classifier_responses_url() == expected  # type: ignore[call-arg]
+
+
+# --------------------------------------------------------------------------- #
+# OrchestratorClient (deployed-orchestrator client, not an AgentInvoker)
+# --------------------------------------------------------------------------- #
+def test_parse_helpdesk_result_fills_request_id() -> None:
+    req = ClassifierInput(request_id="o1", user_id="u", message_text="x", channel="portal")
+    out = _parse_helpdesk_result('{"outcome": "escalated", "escalation_reason": "low_confidence"}', req)
+    assert isinstance(out, HelpdeskResult)
+    assert out.request_id == "o1" and out.outcome == "escalated"
+    assert _parse_helpdesk_result("not json", req) is None
+
+
+@pytest.fixture
+def _orch(monkeypatch: pytest.MonkeyPatch) -> Any:
+    import azure.identity
+
+    monkeypatch.setattr(azure.identity, "DefaultAzureCredential", lambda *a, **k: object())
+    monkeypatch.setattr(
+        azure.identity, "get_bearer_token_provider", lambda *a, **k: (lambda: "fake-token")
+    )
+    calls: list[dict[str, Any]] = []
+    answered = {
+        "request_id": "o1",
+        "outcome": "answered",
+        "category": "support",
+        "answer": "restart the client",
+        "citations": [{"doc_id": "vpn-troubleshooting"}],
+    }
+    replies: list[dict[str, Any]] = [{"output_text": json.dumps(answered)}]
+
+    async def fake_post(self: Any, url: str, **kwargs: Any) -> _FakeResponse:
+        calls.append({"url": url, "json": kwargs.get("json"), "headers": kwargs.get("headers")})
+        return _FakeResponse(replies[min(len(calls) - 1, len(replies) - 1)])
+
+    monkeypatch.setattr("httpx.AsyncClient.post", fake_post)
+    monkeypatch.setattr(OrchestratorClient, "_BACKOFF_SECONDS", 0.0)
+    s = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        orchestrator_agent_endpoint="https://a.services.ai.azure.com/agents/helpdesk-orchestrator/endpoint/protocols/openai/responses",
+    )
+    return OrchestratorClient(s), calls
+
+
+async def test_orchestrator_client_request_and_parse(_orch: Any) -> None:
+    client, calls = _orch
+    req = ClassifierInput(request_id="o1", user_id="u", message_text="vpn down", channel="portal")
+    res = await client.run(req)
+
+    assert isinstance(res, HelpdeskResult)
+    assert res.outcome == "answered" and res.citations[0].doc_id == "vpn-troubleshooting"
+    assert len(calls) == 1
+    assert calls[0]["url"].endswith("/helpdesk-orchestrator/endpoint/protocols/openai/responses")
+    assert calls[0]["headers"]["Authorization"] == "Bearer fake-token"
+    assert calls[0]["json"] == {"input": req.model_dump_json(), "stream": False}
 
 
 # --------------------------------------------------------------------------- #

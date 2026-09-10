@@ -19,12 +19,13 @@ import time
 from rich.console import Console
 from rich.table import Table
 
-from helpdesk.agent_gateway import build_invoker
+from helpdesk.agent_gateway import OrchestratorClient, build_invoker
 from helpdesk.config import get_settings
 from helpdesk.contracts import (
     Category,
     Classification,
     ClassifierInput,
+    HelpdeskResult,
     ResolverInput,
     ResolverOutput,
 )
@@ -46,6 +47,15 @@ _RESOLVER_CASES: list[tuple[str, Category, str, str | None]] = [
     ("My VPN keeps dropping every few minutes — what should I try?", Category.support, "answered", None),
     ("How many weeks of paid parental leave does the primary caregiver get?", Category.hr, "answered", None),
     ("Can you recommend a good lunch spot near the office?", Category.support, "escalated", "not_grounded"),
+]
+
+# (message, expected outcome, expected escalation reason) — the whole graph, end to end.
+_ORCHESTRATOR_CASES: list[tuple[str, str, str | None]] = [
+    ("My VPN keeps dropping every few minutes and I can't reach the server.", "answered", None),
+    ("What is the PTO carryover limit into next year?", "answered", None),
+    ("I was charged twice for my subscription, please refund one.", "escalated", "policy_escalation"),
+    ("My office network printer on the 3rd floor keeps going offline.", "escalated", "not_grounded"),
+    ("hi there, quick question", "escalated", "low_confidence"),
 ]
 
 
@@ -135,7 +145,60 @@ async def _verify_resolver() -> bool:
     return ok
 
 
-_VERIFIERS = {"classifier": _verify_classifier, "resolver": _verify_resolver}
+async def _verify_orchestrator() -> bool:
+    settings = get_settings()
+    client = OrchestratorClient(settings)
+    table = Table(title="orchestrator — remote smoke test (end to end)", show_lines=True)
+    for col in ("message", "expected", "got", "cites", "ms", "result"):
+        table.add_column(col, overflow="fold", max_width=40 if col == "message" else None)
+
+    ok = True
+    for message, expected_outcome, expected_reason in _ORCHESTRATOR_CASES:
+        req = ClassifierInput(
+            request_id=f"verify-{expected_outcome}-{expected_reason or 'ok'}",
+            user_id="verify",
+            message_text=message,
+            channel="portal",
+        )
+        start = time.perf_counter()
+        failures: list[str] = []
+        got = "-"
+        n_cites = "-"
+        try:
+            res = await client.run(req)
+            got = f"{res.outcome}/{res.escalation_reason or '-'}"
+            n_cites = str(len(res.citations))
+            if not isinstance(res, HelpdeskResult):
+                failures.append("not a HelpdeskResult")
+            if res.outcome != expected_outcome:
+                failures.append(f"outcome {res.outcome} != {expected_outcome}")
+            if res.escalation_reason != expected_reason:
+                failures.append(f"reason {res.escalation_reason} != {expected_reason}")
+            if res.outcome == "answered" and (not res.answer or not res.citations):
+                failures.append("answered without answer/citations")
+        except Exception as exc:  # noqa: BLE001 — smoke test surfaces any error
+            detail = f"{type(exc).__name__}: {exc}"
+            resp = getattr(exc, "response", None)
+            if resp is not None:
+                detail += f"\nbody: {resp.text[:500]}"
+            failures.append(detail)
+
+        ms = (time.perf_counter() - start) * 1000
+        ok &= not failures
+        verdict = "[green]PASS[/green]" if not failures else "[red]FAIL: " + "; ".join(failures) + "[/red]"
+        table.add_row(
+            message, f"{expected_outcome}/{expected_reason or '-'}", got, n_cites, f"{ms:.0f}", verdict
+        )
+
+    console.print(table)
+    return ok
+
+
+_VERIFIERS = {
+    "classifier": _verify_classifier,
+    "resolver": _verify_resolver,
+    "orchestrator": _verify_orchestrator,
+}
 
 
 async def main() -> int:
@@ -146,7 +209,11 @@ async def main() -> int:
 
     configure_logging("DEBUG" if args.debug else "INFO")
     s = get_settings()
-    url = s.resolver_responses_url() if args.agent == "resolver" else s.classifier_responses_url()
+    url = {
+        "classifier": s.classifier_responses_url,
+        "resolver": s.resolver_responses_url,
+        "orchestrator": s.orchestrator_responses_url,
+    }[args.agent]()
     console.print(f"[dim]verifying[/dim] {args.agent}  [dim]url=[/dim]{url}")
 
     ok = await _VERIFIERS[args.agent]()

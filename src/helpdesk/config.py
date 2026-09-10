@@ -49,6 +49,9 @@ class Settings(BaseSettings):
             "APPLICATIONINSIGHTS_CONNECTION_STRING",
         ),
     )
+    # ARM id of the App Insights component — only ``scripts/verify_trace_propagation.py``
+    # needs it (to query spans back via azure-monitor-query).
+    appinsights_resource_id: str | None = None
 
     # --- Classifier: Foundry GPT model via FoundryChatClient (Phase 1) ---
     classifier_model: str = "gpt-4.1-mini"

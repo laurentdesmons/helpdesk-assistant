@@ -7,17 +7,21 @@ in every mode; only the invoker changes:
 
 - ``local``  — classifier & resolver run in-process as MAF ``Agent`` objects.
 - ``remote`` — raw HTTPS to the deployed Foundry agents' Responses endpoints,
-  authenticated with a ``DefaultAzureCredential`` bearer token. (Phase 4 may swap
-  in ``langchain-azure-ai``'s agent node for W3C trace-context propagation.)
+  authenticated with a ``DefaultAzureCredential`` bearer token, with a W3C
+  ``traceparent`` injected so the deployed agents' spans chain under the caller.
 - ``fake``   — deterministic keyword stubs for hermetic tests.
 
 Both agents are wired for all three modes. ``billing`` requests short-circuit to a
 ``policy_escalation`` ``ResolverOutput`` in every invoker, before any model or
 search call (README §4: "No resolution attempt").
+
+:class:`OrchestratorClient` is separate — it calls the *deployed orchestrator*
+end-to-end and returns a :class:`HelpdeskResult` (deploy-verification only).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING, Protocol
 
@@ -30,6 +34,7 @@ from helpdesk.contracts import (
     Classification,
     ClassifierInput,
     EscalationReason,
+    HelpdeskResult,
     ResolverInput,
     ResolverOutput,
 )
@@ -314,6 +319,93 @@ class RemoteInvoker:
         raise RuntimeError(
             f"remote resolver failed for {req.request_id!r} after {self._MAX_ATTEMPTS} attempts; "
             f"last: {last_error}"
+        )
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _parse_helpdesk_result(text: str | None, req: ClassifierInput) -> HelpdeskResult | None:
+    if not text:
+        return None
+    candidate = text.strip()
+    if candidate.startswith("```"):
+        candidate = candidate.strip("`").removeprefix("json").strip()
+    try:
+        data = json.loads(candidate)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if isinstance(data, dict):
+        data.setdefault("request_id", req.request_id)
+    try:
+        return HelpdeskResult.model_validate(data)
+    except ValueError:
+        return None
+
+
+class OrchestratorClient:
+    """Calls the deployed orchestrator agent end-to-end.
+
+    Not an :class:`AgentInvoker` — it runs the whole graph server-side and returns
+    a :class:`HelpdeskResult`. Used by ``scripts/verify_deploy.py orchestrator``
+    and ``scripts/verify_trace_propagation.py``. Routing (including the billing
+    short-circuit) is owned by the deployed graph, not repeated here.
+    """
+
+    _MAX_ATTEMPTS = 4
+    _BACKOFF_SECONDS = 2.0
+
+    def __init__(self, settings: Settings) -> None:
+        from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+
+        self._url = settings.orchestrator_responses_url()
+        self._token = get_bearer_token_provider(DefaultAzureCredential(), _AGENT_SCOPE)
+
+    async def run(self, req: ClassifierInput) -> HelpdeskResult:
+        import asyncio
+
+        import httpx
+
+        prompt = req.model_dump_json()
+        headers = {"Authorization": f"Bearer {self._token()}"}
+        inject(headers)  # W3C traceparent — the whole point of the deployed graph
+        last_error = "no attempts made"
+
+        # classify + route + resolve, each its own cross-region hosted call with
+        # its own internal retries — the whole chain can run several minutes cold.
+        # A generous timeout matters: a client-abandoned request keeps churning
+        # server-side and piles onto the next one.
+        async with httpx.AsyncClient(timeout=300) as client:
+            for attempt in range(1, self._MAX_ATTEMPTS + 1):
+                if attempt > 1:
+                    await asyncio.sleep(self._BACKOFF_SECONDS * (attempt - 1))
+                try:
+                    resp = await client.post(
+                        self._url, json={"input": prompt, "stream": False}, headers=headers
+                    )
+                    resp.raise_for_status()
+                    body = resp.json()
+                except httpx.HTTPError as exc:  # timeout / connect / 5xx — transient
+                    last_error = f"{type(exc).__name__}: {exc}"
+                    logger.warning("orchestrator attempt %d: %s", attempt, last_error)
+                    continue
+
+                if body.get("status") == "failed":
+                    err = body.get("error") or {}
+                    last_error = f"run failed [{err.get('code')}]: {err.get('message')}"
+                    logger.warning("orchestrator attempt %d: %s", attempt, last_error)
+                    continue
+
+                text = _extract_responses_text(body)
+                logger.debug("remote orchestrator extracted text: %r", text)
+                parsed = _parse_helpdesk_result(text, req)
+                if parsed is not None:
+                    return parsed
+                last_error = f"unparseable response text: {text!r}"
+
+        raise RuntimeError(
+            f"deployed orchestrator failed for {req.request_id!r} after "
+            f"{self._MAX_ATTEMPTS} attempts; last: {last_error}"
         )
 
     async def aclose(self) -> None:

@@ -80,8 +80,8 @@ IT Help Desk Agent Assistant. LangGraph orchestrator + two Microsoft Agent Frame
   (empty `${VAR}` → `model=""` → 404) fixed with `env_ignore_empty=True` +
   trimmed `azure.yaml` env — see Deployment.
 
-- Phase 4 (part 1) — **LangGraph orchestrator built + verified locally, not
-  deployed.** `src/helpdesk/agents/orchestrator/` (`graph.py` pure
+- Phase 4 — **`helpdesk-orchestrator` deployed and verified; trace propagation
+  VERIFIED.** `src/helpdesk/agents/orchestrator/` (`graph.py` pure
   `build_graph(settings, invoker=…)` + `run_graph`; `host.py` `_GraphAgent`
   `SupportsAgentRun` shim over the compiled graph for `ResponsesHostServer`;
   `instructions.md`). Nodes `classify → route → resolve | escalate_low_confidence
@@ -89,30 +89,50 @@ IT Help Desk Agent Assistant. LangGraph orchestrator + two Microsoft Agent Frame
   `confidence < confidence_threshold` (0.8) → `escalate_low_confidence` (any
   category), else `resolve`. Billing is **not** special-cased in the graph — the
   `agent_gateway` seam short-circuits it. `finalize` is the single I/O point:
-  builds `HelpdeskResult`, writes an `EscalationRecord` on any escalation.
+  builds `HelpdeskResult`, writes an `EscalationRecord` on any escalation
+  (**non-fatally** — a failed store write logs + still returns the result).
   `src/helpdesk/tracing.py` (`build_tracer` = `AzureAIOpenTelemetryTracer`, no-op
   export without an App Insights conn string but still emits spans;
   `configure_tracing` installs an OTel-SDK `TracerProvider` +
   `TraceIdRatioBased` sampler). `agent_gateway` gains `inject(headers)` on both
-  `RemoteInvoker` calls (W3C `traceparent`), `CompositeInvoker`, and
-  `build_graph_invoker(settings, mode=None)` (per-agent modes in one graph run).
-  `scripts/run_local_graph.py`, `eval/orchestrator_eval.py` (code-based: outcome
-  accuracy + billing sub-gate + low_confidence recall + citation validity +
-  escalation-record written) + `eval/datasets/orchestrator_scenarios.jsonl`
-  (14 rows, all 5 outcomes). `agent_role` widened to `orchestrator`; `main.py`
-  branch; `orchestrator` service in `azure.yaml` (written, **not `azd`-deployed**).
-  `pyproject.toml` / `requirements.txt` gain `langgraph`, `langchain-azure-ai
-  [opentelemetry]`, `opentelemetry-sdk`. **Fake-invoker classifier confidence
-  bumped to ≥ 0.85 on a keyword hit** (a clear match must not trip
-  low_confidence) and the fake resolver now cites real `docs/` doc_ids. **100%
-  outcome accuracy on the 14-row set, fake + in-process.**
+  `RemoteInvoker` calls + `OrchestratorClient` (W3C `traceparent`),
+  `CompositeInvoker`, `build_graph_invoker(settings, mode=None)`, and
+  `OrchestratorClient` (calls the deployed graph end-to-end → `HelpdeskResult`).
+  `RemoteInvoker` now retries `httpx` transport errors (cross-region read
+  timeouts), not just `status: failed`. `scripts/run_local_graph.py`,
+  `eval/orchestrator_eval.py` (code-based: outcome accuracy + billing sub-gate +
+  low_confidence recall + citation validity + escalation-record written) +
+  `eval/datasets/orchestrator_scenarios.jsonl` (14 rows, all 5 outcomes),
+  `verify_deploy.py orchestrator`, `scripts/verify_trace_propagation.py`.
+  `agent_role` widened to `orchestrator`; `main.py` branch; `orchestrator` service
+  in `azure.yaml`. `pyproject.toml` / `requirements.txt` gain `langgraph`,
+  `langchain-azure-ai[opentelemetry]`, `opentelemetry-sdk` (+ `azure-monitor-query`
+  in `[dev]`). **Fake-invoker classifier confidence bumped to ≥ 0.85 on a keyword
+  hit** (a clear match must not trip low_confidence); the fake resolver cites real
+  `docs/` doc_ids.
+  - **Deploy** — App Insights `appi-helpdesk-dev` (workspace-based on
+    `log-helpdesk-dev`) connected to the project → runtime injects
+    `APPLICATIONINSIGHTS_CONNECTION_STRING` into every agent; classifier +
+    resolver redeployed (v3) to pick it up. Orchestrator = hosted agent #3,
+    **2 CPU / 4 Gi**, `HELPDESK_AGENT_MODE=remote`, sibling endpoints from
+    `${AGENT_{CLASSIFIER,RESOLVER}_RESPONSES_ENDPOINT}`. **No RBAC grant needed** —
+    the orchestrator MI's implicit project access covers the sibling-agent calls.
+  - **Gotchas** — (1) the hosted-agent container root FS is **read-only**: the JSON
+    escalation store `mkdir`/`FileLock` threw → every *escalated* request 500'd
+    (answered ones were fine). Fix: `HELPDESK_ESCALATION_STORE_PATH=/tmp/helpdesk/
+    escalations.json` in `azure.yaml` + the `finalize` write is now non-fatal.
+    (2) `AzureAIOpenTelemetryTracer` sets no resource `service.name` → the
+    orchestrator's graph-node spans landed as `cloud_RoleName="unknown_service"`.
+    Fix: `OTEL_SERVICE_NAME=helpdesk-orchestrator` in `azure.yaml`.
+  - **Verified** — `verify_deploy.py orchestrator` 5/5 through the deployed graph;
+    `orchestrator_eval` 100% (fake + in-process) with 100% local↔remote parity
+    (14/14); `verify_trace_propagation.py` → one App Insights `operation_Id` spans
+    the orchestrator's node spans, the classifier's `chat gpt-4.1-mini`, and the
+    resolver's `chat gpt-5.4-mini` + `execute_tool search_knowledge_base`.
 
-**Next:** Phase 4 part 2 — deploy `helpdesk-orchestrator` (grant `Azure AI User`
-on the project to its MI), `HELPDESK_AGENT_MODE=remote` end-to-end eval +
-local↔remote parity, `scripts/verify_trace_propagation.py` (one correlated trace
-across all three agents). Then Phase 4.5 — `eval/run_all.py`.
-
-**Not committed yet** — all work is untracked on `main`.
+**Next:** Phase 4.5 — `eval/run_all.py` (one gate over classifier + resolver +
+orchestrator evals, non-zero exit, pre-`azd deploy` + CI). Then Phase 5 —
+durable escalation store (Azure Table) + review UI.
 
 ## Golden rules
 
@@ -144,14 +164,17 @@ across all three agents). Then Phase 4.5 — `eval/run_all.py`.
     --min-outcome-accuracy 0.90` (outcome accuracy, billing sub-gate,
     low_confidence recall, citation validity, escalation-record written), then
     `HELPDESK_CLASSIFIER_MODE=remote HELPDESK_RESOLVER_MODE=remote ...
-    --min-outcome-accuracy 0.85 --compare <local report>` (part 2, needs the
-    agents deployed; the orchestrator itself still runs in-process).
+    --min-outcome-accuracy 0.85 --compare <local report>` (graph in-process,
+    agents deployed — the 100%-parity check). Post-deploy: `verify_deploy.py
+    orchestrator` (whole graph through the deployed endpoint) +
+    `verify_trace_propagation.py`.
 
 ## Layout
 
 - `src/helpdesk/` shared lib: `contracts`, `config`, `logging`, `tracing` (P4 —
   `build_tracer` + `configure_tracing`), `agent_gateway` (P1 — invokers +
-  `CompositeInvoker` / `build_graph_invoker`), `escalation`, `search/` (P2).
+  `CompositeInvoker` / `build_graph_invoker` + `OrchestratorClient`),
+  `escalation`, `search/` (P2).
 - `src/helpdesk/agents/{classifier,resolver}/` — `agent.py` (pure builder + run
   helpers), `host.py` (`ResponsesHostServer` entrypoint), `instructions.md`.
   `src/helpdesk/agents/orchestrator/` — `graph.py` (pure `build_graph` +
@@ -277,8 +300,8 @@ uv run python -m eval.orchestrator_eval --gate    # end-to-end routing matrix
 uv run python scripts/build_kb.py --recreate      # build search indexes (--dry-run: chunk only)
 uv run python scripts/search_kb.py --category support --query "vpn drops"   # manual KB query
 RUN_LIVE_EVAL=1 uv run python -m eval.run_all      # full eval gate (Phase 4.5 — not yet)
-uv run python scripts/verify_deploy.py <agent>    # post-deploy smoke test
-uv run python scripts/verify_trace_propagation.py # assert one correlated trace (Phase 4 part 2)
+uv run python scripts/verify_deploy.py <agent>    # post-deploy smoke test (classifier|resolver|orchestrator)
+uv run python scripts/verify_trace_propagation.py # assert one correlated App Insights trace
 ```
 
 ## Deployment (azd, one agent at a time)
@@ -319,12 +342,32 @@ HELPDESK_RESOLVER_MODE=remote uv run python -m eval.resolver_eval --gate \
   --min-routing-accuracy 0.85 --compare <local report> --min-parity 0.95
 ```
 
-**Orchestrator (Phase 4 part 2 — not done yet)** — same flow. No model of its
-own; it calls the two deployed agents (`HELPDESK_AGENT_MODE=remote`, endpoints
-passed as `${AGENT_{CLASSIFIER,RESOLVER}_RESPONSES_ENDPOINT}` in `azure.yaml`).
-After `azd deploy orchestrator`, grant its MI `Azure AI User` on the project,
-then `verify_deploy.py orchestrator` + `verify_trace_propagation.py`. Local host:
-`uv run python -m helpdesk.agents.orchestrator.host`.
+**Orchestrator (Phase 4)** — no `azd provision` (connect-to-existing project;
+that CLAUDE.md line is boilerplate — there's no `infra/main.bicep`, `azd deploy
+<service>` registers the agent directly). No model of its own; it calls the two
+deployed agents (`HELPDESK_AGENT_MODE=remote`, endpoints as
+`${AGENT_{CLASSIFIER,RESOLVER}_RESPONSES_ENDPOINT}` in `azure.yaml`). **No RBAC
+grant** — implicit project access covers the sibling calls.
+
+```
+# 1. App Insights (once) — workspace-based component, connect it to the project
+#    in the Foundry portal (project → Tracing → Connect Application Insights).
+#    Then redeploy classifier + resolver so the runtime injects the conn string.
+azd deploy classifier && azd deploy resolver
+# 2. orchestrator
+azd deploy orchestrator
+azd env set HELPDESK_ORCHESTRATOR_AGENT_ENDPOINT $(azd env get-value AGENT_ORCHESTRATOR_RESPONSES_ENDPOINT)
+uv run python scripts/verify_deploy.py orchestrator          # 5 canned end-to-end cases
+uv run python scripts/verify_trace_propagation.py            # one correlated App Insights trace
+# local host: uv run python -m helpdesk.agents.orchestrator.host
+```
+
+**Gotchas (orchestrator deploy):** (1) container root FS is **read-only** — the
+JSON escalation store needs `HELPDESK_ESCALATION_STORE_PATH=/tmp/…` (set in
+`azure.yaml`); without it every *escalated* request 500'd. (2) `OTEL_SERVICE_NAME=
+helpdesk-orchestrator` in `azure.yaml` — else its graph-node spans show as
+`cloud_RoleName="unknown_service"`. (3) 2 CPU / 4 Gi — the langgraph +
+langchain-azure-ai + azure-monitor stack is heavy.
 
 **Gotcha (first resolver deploy):** `azure.yaml` env values are `${VAR}`
 substitutions from the azd env; an unset one expands to `""`. Before
@@ -346,14 +389,22 @@ no RBAC grant is needed. Runtime injects `FOUNDRY_PROJECT_ENDPOINT` and
 `src/helpdesk/tracing.py`: `build_tracer(settings)` returns an
 `AzureAIOpenTelemetryTracer` (from `langchain-azure-ai`), or `None` when
 `HELPDESK_TRACING_ENABLED=false`. `run_graph` attaches it as a callback
-(`config={"callbacks": [tracer]}`). With an App Insights connection string set the
-tracer auto-configures Azure Monitor export; without one it still emits spans on a
-local `TracerProvider` that `configure_tracing` installs (enough for `trace=` in
-logs + `traceparent` on the `RemoteInvoker` calls). All three agents must share
-one App Insights connection string. Trace-context propagation across the
-orchestrator→agent calls is VERIFIED in Phase 4 part 2, not assumed — see
-`scripts/verify_trace_propagation.py`. View: Azure Monitor → Investigate → Agents
-(Preview) for the graph; Foundry portal → Observability → Traces for agent spans.
+(`config={"callbacks": [tracer]}`) and sets `helpdesk.request_id` OTel baggage.
+With an App Insights connection string set the tracer auto-configures Azure
+Monitor export; without one it still emits spans on a local `TracerProvider` that
+`configure_tracing` installs (enough for `trace=` in logs + `traceparent` on the
+`RemoteInvoker` calls). App Insights `appi-helpdesk-dev` is connected to the
+project, so the runtime injects `APPLICATIONINSIGHTS_CONNECTION_STRING` into all
+three agent containers. **Trace-context propagation across the orchestrator→agent
+calls is VERIFIED** (`scripts/verify_trace_propagation.py`): one `operation_Id`
+spans the orchestrator's node spans + `POST .../helpdesk-{classifier,resolver}/…`
+dependencies, the classifier's `chat gpt-4.1-mini`, and the resolver's `chat
+gpt-5.4-mini` + `execute_tool search_knowledge_base`. `verify_trace_propagation.py`
+stands up its own `TracerProvider` + Azure Monitor exporter (the verify process
+isn't a graph host), fires one request in a recording root span, and polls
+`requests`/`dependencies` via `azure-monitor-query` until all three roles appear.
+View: Azure Monitor → Investigate → Agents (Preview) for the graph; Foundry portal
+→ Observability → Traces for agent spans.
 
 ## Do not
 
