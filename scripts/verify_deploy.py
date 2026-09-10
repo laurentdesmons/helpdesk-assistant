@@ -21,7 +21,13 @@ from rich.table import Table
 
 from helpdesk.agent_gateway import build_invoker
 from helpdesk.config import get_settings
-from helpdesk.contracts import Category, Classification, ClassifierInput
+from helpdesk.contracts import (
+    Category,
+    Classification,
+    ClassifierInput,
+    ResolverInput,
+    ResolverOutput,
+)
 from helpdesk.logging import configure_logging
 
 console = Console()
@@ -32,6 +38,14 @@ _CLASSIFIER_CASES: list[tuple[str, str, Category]] = [
     ("My VPN keeps dropping every few minutes and I can't reach the server.", "teams", Category.support),
     ("How many weeks of paid parental leave am I entitled to?", "portal", Category.hr),
     ("Please reset my password, the portal says my account is locked.", "portal", Category.support),
+]
+
+# (message, category, expected status, expected escalation reason)
+_RESOLVER_CASES: list[tuple[str, Category, str, str | None]] = [
+    ("I was charged twice, please refund one.", Category.billing, "escalated", "policy_escalation"),
+    ("My VPN keeps dropping every few minutes — what should I try?", Category.support, "answered", None),
+    ("How many weeks of paid parental leave does the primary caregiver get?", Category.hr, "answered", None),
+    ("Can you recommend a good lunch spot near the office?", Category.support, "escalated", "not_grounded"),
 ]
 
 
@@ -78,7 +92,50 @@ async def _verify_classifier() -> bool:
     return ok
 
 
-_VERIFIERS = {"classifier": _verify_classifier}
+async def _verify_resolver() -> bool:
+    settings = get_settings()
+    invoker = build_invoker(settings, "remote")
+    table = Table(title="resolver — remote smoke test", show_lines=True)
+    for col in ("message", "cat", "expected", "got", "cites", "ms", "result"):
+        table.add_column(col, overflow="fold", max_width=42 if col == "message" else None)
+
+    ok = True
+    for message, category, expected_status, expected_reason in _RESOLVER_CASES:
+        req = ResolverInput(request_id=f"verify-{category}", category=category, message_text=message)
+        start = time.perf_counter()
+        failures: list[str] = []
+        got = "-"
+        n_cites = "-"
+        try:
+            res = await invoker.invoke_resolver(req)
+            got = f"{res.status}/{res.escalation_reason or '-'}"
+            n_cites = str(len(res.citations))
+            if not isinstance(res, ResolverOutput):
+                failures.append("not a ResolverOutput")
+            if res.status != expected_status:
+                failures.append(f"status {res.status} != {expected_status}")
+            if expected_reason and res.escalation_reason != expected_reason:
+                failures.append(f"reason {res.escalation_reason} != {expected_reason}")
+            if res.status == "answered" and (not res.answer or not res.citations):
+                failures.append("answered without answer/citations")
+        except Exception as exc:  # noqa: BLE001 — smoke test surfaces any error
+            detail = f"{type(exc).__name__}: {exc}"
+            resp = getattr(exc, "response", None)
+            if resp is not None:
+                detail += f"\nbody: {resp.text[:500]}"
+            failures.append(detail)
+
+        ms = (time.perf_counter() - start) * 1000
+        ok &= not failures
+        verdict = "[green]PASS[/green]" if not failures else "[red]FAIL: " + "; ".join(failures) + "[/red]"
+        expected = f"{expected_status}/{expected_reason or '-'}"
+        table.add_row(message, str(category), expected, got, n_cites, f"{ms:.0f}", verdict)
+
+    console.print(table)
+    return ok
+
+
+_VERIFIERS = {"classifier": _verify_classifier, "resolver": _verify_resolver}
 
 
 async def main() -> int:
@@ -88,7 +145,8 @@ async def main() -> int:
     args = ap.parse_args()
 
     configure_logging("DEBUG" if args.debug else "INFO")
-    url = get_settings().classifier_responses_url()
+    s = get_settings()
+    url = s.resolver_responses_url() if args.agent == "resolver" else s.classifier_responses_url()
     console.print(f"[dim]verifying[/dim] {args.agent}  [dim]url=[/dim]{url}")
 
     ok = await _VERIFIERS[args.agent]()

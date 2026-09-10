@@ -25,3 +25,13 @@ def test_embedding_defaults() -> None:
     assert s.embedding_model == "text-embedding-3-small"
     assert s.embedding_dimensions == 1536
     assert s.search_query_type == "vector_semantic_hybrid"
+
+
+def test_empty_env_var_falls_back_to_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An unresolved ``${VAR}`` in azure.yaml arrives as "" — it must not clobber
+    # the field default (this bit the first resolver deploy).
+    monkeypatch.setenv("HELPDESK_EMBEDDING_MODEL", "")
+    monkeypatch.setenv("HELPDESK_SEARCH_QUERY_TYPE", "")
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.embedding_model == "text-embedding-3-small"
+    assert s.search_query_type == "vector_semantic_hybrid"

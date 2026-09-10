@@ -1,14 +1,17 @@
 # IT Help Desk Agent Assistant — Design Doc
 
-*Living document, updated each phase. Current: Phase 2 complete — KB / Azure AI
-Search layer built and **verified end-to-end** (`src/helpdesk/search/`,
-`scripts/build_kb.py`, `scripts/search_kb.py`, hermetic chunking tests).
-Chunk-at-H2 → 24 chunks, two push-model indexes (`support-index`, `hr-index`),
-`text-embedding-3-small` (1536-d), hybrid + semantic ranker. Search service
-provisioned manually; `build_kb.py --recreate` populated both indexes and all
-spot queries land on the right doc/section. Previous: Phase 1 — classifier
-(`gpt-4.1-mini` on `FoundryChatClient`) **deployed** and verified 100% both ways.
-Next: Phase 3 (resolver).*
+*Living document, updated each phase. Current: Phase 3 — **`helpdesk-resolver`
+deployed and verified.** `src/helpdesk/agents/resolver/` = `gpt-5.4-mini` on
+`FoundryChatClient` + a custom MAF `@tool` `search_knowledge_base` wrapping the
+Phase 2 `KnowledgeBaseSearch.search()`; `response_format` + `tool_choice="required"`
+baked into the agent defaults; billing short-circuits to `policy_escalation`,
+`answered`-without-citations downgrades to `not_grounded`.
+`scripts/run_local_resolver.py`, `eval/resolver_eval.py` (code-based) + a 35-row
+labeled set, `verify_deploy.py resolver`, `main.py` role switch, `resolver`
+service in `azure.yaml`. **gpt-5.4-mini scores 100% on every metric, in-process
+and through the deployed endpoint, with 100% local↔remote parity (35/35).**
+Previous: Phase 2 — KB / Azure AI Search layer, verified end-to-end. Next: Phase 4
+(LangGraph orchestrator + tracing).*
 
 ## 1. Category taxonomy
 - `billing`
@@ -73,11 +76,72 @@ LangGraph orchestrator (hosted agent in Foundry)
 
 **Confirmed:** Model = GPT-5.4-mini (dev only), via Foundry model catalog + Microsoft Agent Framework's `FoundryChatClient`. Fallback: gpt-5-mini if 5.4 isn't enabled on the subscription. To be re-evaluated against Sonnet 5 / full GPT-5 once real eval results are in (see Section 7) — mini-tier carries real accuracy risk on the groundedness judgment specifically.
 
+**Output shape (`ResolverOutput`, folded in from `contracts.py`):**
+```json
+{
+  "request_id": "string",
+  "status": "answered | escalated",
+  "answer": "string | null",              // required iff status == "answered"
+  "citations": [ { "doc_id": "string", "title": "string?", "snippet": "string?", "score": 0.0 } ],
+  "escalation_reason": "not_grounded | policy_escalation | low_confidence | null"  // required iff escalated
+}
+```
+
+**Phase 3 build.** `src/helpdesk/agents/resolver/agent.py` mirrors the classifier:
+a pure `build_resolver_agent(settings)` on `FoundryChatClient` (project endpoint,
+`HELPDESK_RESOLVER_MODEL`), a `resolve(agent, req)` run helper, `instructions.md`.
+Retrieval is `make_search_tool(settings)` — a MAF **`@tool`** (`from agent_framework
+import tool`; `ai_function` isn't exported) named `search_knowledge_base` that
+wraps `KnowledgeBaseSearch.search(category, query)` and returns JSON snippets
+(`doc_id`, `title`, `snippet`, `score`). *Not* the `agent-framework-azure-ai-search`
+context provider and *not* the hosted search tool — an explicit tool so tool-call
+spans + retrieved context feed the evaluators. `default_options` bakes in
+`response_format` **and** `tool_choice="required"` (which `agent_framework`
+auto-resets to `auto` after the first tool turn), because the Foundry host server
+drops per-request options — so one forced grounded retrieval has to be the agent
+default. Structured output goes through a constraint-free `_ResolverDraft` model
+(strict JSON-schema validators reject `min_length`, exactly as for
+`Classification`), re-validated into `ResolverOutput` client-side.
+
+**Confirmed behaviour:**
+- **billing** — `invoke_resolver` short-circuits to
+  `status="escalated"`, `escalation_reason="policy_escalation"` **before any model
+  or search call**, in every invoker (local / remote / fake). One place owns
+  billing.
+- **support / hr** — the model must call `search_knowledge_base`, answer only from
+  the returned snippets with ≥1 citation, else escalate `not_grounded`.
+- **guard** — `resolve()` downgrades an `answered` result with empty `citations`
+  to `escalated` / `not_grounded`; two unparseable attempts also fall back to
+  `not_grounded` rather than failing the request.
+
+**Deploy (Phase 3 deploy).** Ships as a Foundry **Hosted Agent** alongside the
+classifier — both services deploy the same zip; `main.py` selects the host on
+`HELPDESK_AGENT_ROLE`. `resolver` service in `azure.yaml` (code-deploy,
+`remote_build`, CPU 1 / 2Gi for the search + embeddings client stack). The
+resolver MI needs two explicit grants its implicit inference access doesn't
+cover: `Search Index Data Reader` on the Search service and `Cognitive Services
+OpenAI User` at the **account** scope (the query-embedding call hits the
+account-level `/openai/v1` route). `Settings` uses `env_ignore_empty=True` so an
+unresolved `${VAR}` from `azure.yaml` falls back to its default instead of
+clobbering it with `""`. Verified: `verify_deploy.py resolver` all-pass, remote
+eval 100%, **100% local↔remote routing parity (35/35)**; hosted latency ~15–24s.
+
 ## 7. Evaluation plan
 
 **Classifier** — code-based evaluator, no LLM judge. Labeled test set (request text → known correct category) → accuracy/precision/recall/confusion matrix per category (billing/support/hr).
 
-**Resolver** — Foundry built-in RAG/agent evaluators:
+**Resolver** — Phase 3 ships a **code-based** `eval/resolver_eval.py` (no LLM
+judge): routing accuracy (answer vs. escalate + the escalation reason), a hard
+billing sub-gate (every billing row must escalate `policy_escalation`),
+not-grounded precision/recall over the off-KB rows, and citation validity (every
+cited `doc_id` must exist in the KB — derived from `docs/` via the pure
+`iter_chunks`). 35-row labeled set at `eval/datasets/resolver_labeled.jsonl`;
+gpt-5.4-mini scores 100% on every metric locally.
+
+The LLM-judge evaluators below are **scaffolded but not run** — `--judge` wires
+`azure-ai-evaluation` (in the `[eval]` extra) if installed, and a real
+groundedness score still needs a labeled set against the *actual* KB (see the
+blocking gap). Foundry built-in RAG/agent evaluators, for when that lands:
 - Groundedness (response supported by retrieved context, not fabricated)
 - Relevance (response addresses the query)
 - Retrieval Quality (isolates retrieval failures from generation failures)
@@ -125,8 +189,12 @@ search tool (the Phase 3 resolver wraps `KnowledgeBaseSearch.search()` in its ow
   Search **Basic** tier, semantic ranker on the **free** plan, AAD auth
   (`DefaultAzureCredential`); `text-embedding-3-small` deployed via the portal
   Model catalog; `Search Service Contributor` + `Search Index Data Contributor`
-  for the dev user; `HELPDESK_SEARCH_ENDPOINT` in `.env`. Phase 3 adds a Foundry
-  connection + `Search Index Data Reader` on the resolver agent MI.
+  for the dev user; `HELPDESK_SEARCH_ENDPOINT` in `.env`. **Phase 3 deploy adds,
+  on the resolver agent's managed identity:** `Search Index Data Reader` on the
+  Search service, a Foundry connection to it, **and** `Cognitive Services OpenAI
+  User` at the *account* scope — the resolver's search tool embeds the query on
+  the account-level `/openai/v1` route, which the MI's implicit (project-scoped)
+  inference access does not cover.
 
 **Sample content:** placeholder KB docs (`docs/`) — fictional, generic, marked
 `status: SAMPLE PLACEHOLDER`. Not real policy. Swapped for actual documents

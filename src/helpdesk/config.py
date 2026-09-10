@@ -25,6 +25,9 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         populate_by_name=True,
+        # An empty env var (e.g. an unresolved ``${VAR}`` in azure.yaml) must fall
+        # back to the field default, not override it with "".
+        env_ignore_empty=True,
     )
 
     # --- Foundry project (Phase 0.5) --------------------------------------
@@ -89,8 +92,17 @@ class Settings(BaseSettings):
             "HELPDESK_CLASSIFIER_AGENT_ENDPOINT", "AGENT_CLASSIFIER_RESPONSES_ENDPOINT"
         ),
     )
+    resolver_agent_endpoint: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "HELPDESK_RESOLVER_AGENT_ENDPOINT", "AGENT_RESOLVER_RESPONSES_ENDPOINT"
+        ),
+    )
 
     # --- Behaviour ------------------------------------------------------
+    # Entry-point role for the shared ``main.py`` deploy shim; set per-service in
+    # ``azure.yaml``. Only matters when a single zip hosts more than one agent.
+    agent_role: Literal["classifier", "resolver"] = "classifier"
     agent_mode: AgentMode = "local"
     classifier_mode: AgentMode | None = None
     resolver_mode: AgentMode | None = None
@@ -104,16 +116,16 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
-    def classifier_responses_url(self) -> str:
-        """The `POST /responses` URL of the deployed classifier agent.
+    def _agent_responses_url(self, explicit: str | None, agent_name: str) -> str:
+        """The `POST /responses` URL of a deployed agent.
 
-        Prefers ``classifier_agent_endpoint`` — which ``azd`` writes to the env as
-        ``AGENT_CLASSIFIER_RESPONSES_ENDPOINT`` already fully-formed (with its
+        Prefers ``explicit`` — which ``azd`` writes to the env as
+        ``AGENT_<ROLE>_RESPONSES_ENDPOINT`` already fully-formed (with its
         ``?api-version`` query). Only a bare agent base URL gets ``/responses``
         appended. Falls back to deriving from the project endpoint + agent name.
         """
-        if self.classifier_agent_endpoint:
-            parts = urlsplit(self.classifier_agent_endpoint)
+        if explicit:
+            parts = urlsplit(explicit)
             path = parts.path.rstrip("/")
             if not path.endswith("/responses"):
                 path = f"{path}/responses"
@@ -122,9 +134,17 @@ class Settings(BaseSettings):
         assert self.foundry_project_endpoint is not None  # narrowed by require()
         project = self.foundry_project_endpoint.rstrip("/")
         return (
-            f"{project}/agents/{self.classifier_agent_name}"
+            f"{project}/agents/{agent_name}"
             "/endpoint/protocols/openai/responses?api-version=v1"
         )
+
+    def classifier_responses_url(self) -> str:
+        """The `POST /responses` URL of the deployed classifier agent."""
+        return self._agent_responses_url(self.classifier_agent_endpoint, self.classifier_agent_name)
+
+    def resolver_responses_url(self) -> str:
+        """The `POST /responses` URL of the deployed resolver agent."""
+        return self._agent_responses_url(self.resolver_agent_endpoint, self.resolver_agent_name)
 
     def index_for(self, category: str) -> str:
         """Search index name for a category. ``billing`` has no KB — it escalates."""

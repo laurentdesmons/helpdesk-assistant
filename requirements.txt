@@ -16,6 +16,9 @@ azure-ai-agentserver-responses==1.0.0b5
 
 azure-ai-projects>=2.2
 azure-identity>=1.17
+# Phase 3: the resolver container runs KnowledgeBaseSearch (KB retrieval tool).
+azure-search-documents>=12.1.0b2
+openai>=1.40
 pydantic>=2.7
 pydantic-settings>=2.2
 python-dotenv>=1.0

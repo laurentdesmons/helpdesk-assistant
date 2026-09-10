@@ -11,31 +11,48 @@ in every mode; only the invoker changes:
   in ``langchain-azure-ai``'s agent node for W3C trace-context propagation.)
 - ``fake``   — deterministic keyword stubs for hermetic tests.
 
-Phase 1 (+ its deploy step) wires the classifier for ``local``, ``remote`` and
-``fake``. The resolver lands in Phase 3.
+Both agents are wired for all three modes. ``billing`` requests short-circuit to a
+``policy_escalation`` ``ResolverOutput`` in every invoker, before any model or
+search call (README §4: "No resolution attempt").
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from helpdesk.config import AgentMode, Settings
 from helpdesk.contracts import (
     Category,
+    Citation,
     Classification,
     ClassifierInput,
+    EscalationReason,
     ResolverInput,
     ResolverOutput,
 )
 
+if TYPE_CHECKING:
+    from agent_framework import Agent
+
+    from helpdesk.search.client import KnowledgeBaseSearch
+
 logger = logging.getLogger("helpdesk.gateway")
+
+
+def _resolver_escalation(req: ResolverInput, reason: EscalationReason) -> ResolverOutput:
+    return ResolverOutput(request_id=req.request_id, status="escalated", escalation_reason=reason)
 
 
 class AgentInvoker(Protocol):
     async def invoke_classifier(self, req: ClassifierInput) -> Classification: ...
 
     async def invoke_resolver(self, req: ResolverInput) -> ResolverOutput: ...
+
+    async def aclose(self) -> None:
+        """Release any async resources (the local resolver's KB clients). No-op for
+        the remote and fake invokers."""
+        ...
 
 
 def build_invoker(settings: Settings, mode: AgentMode | None = None) -> AgentInvoker:
@@ -59,7 +76,10 @@ class LocalInvoker:
 
         self._settings = settings
         self._classifier = build_classifier_agent(settings)
-        self._resolver = None  # Phase 3
+        # Built lazily on the first non-billing resolve so classifier-only local
+        # use doesn't need HELPDESK_SEARCH_ENDPOINT.
+        self._resolver: Agent | None = None
+        self._kb: KnowledgeBaseSearch | None = None
 
     async def invoke_classifier(self, req: ClassifierInput) -> Classification:
         from helpdesk.agents.classifier.agent import classify
@@ -67,7 +87,20 @@ class LocalInvoker:
         return await classify(self._classifier, req)
 
     async def invoke_resolver(self, req: ResolverInput) -> ResolverOutput:
-        raise NotImplementedError("resolver lands in Phase 3")
+        from helpdesk.agents.resolver.agent import build_resolver_agent, resolve
+        from helpdesk.search.client import build_kb_search
+
+        if req.category == Category.billing:
+            return _resolver_escalation(req, "policy_escalation")
+        if self._resolver is None:
+            self._kb = build_kb_search(self._settings)
+            self._resolver = build_resolver_agent(self._settings, kb=self._kb)
+        return await resolve(self._resolver, req)
+
+    async def aclose(self) -> None:
+        if self._kb is not None:
+            await self._kb.aclose()
+            self._kb = None
 
 
 # Entra ID scope for invoking a deployed Foundry *agent* endpoint (the in-process
@@ -105,7 +138,9 @@ class RemoteInvoker:
         from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 
         self._settings = settings
-        self._url = settings.classifier_responses_url()
+        self._classifier_url = settings.classifier_responses_url()
+        # Resolved lazily so a classifier-only remote caller needn't configure it.
+        self._resolver_url: str | None = None
         self._token = get_bearer_token_provider(DefaultAzureCredential(), _AGENT_SCOPE)
 
     # Attempts share one budget: transient server errors (model overload/throttle)
@@ -131,7 +166,7 @@ class RemoteInvoker:
                     await asyncio.sleep(self._BACKOFF_SECONDS * (attempt - 1))
 
                 resp = await client.post(
-                    self._url, json={"input": prompt, "stream": False}, headers=headers
+                    self._classifier_url, json={"input": prompt, "stream": False}, headers=headers
                 )
                 resp.raise_for_status()
                 body = resp.json()
@@ -161,13 +196,78 @@ class RemoteInvoker:
         )
 
     async def invoke_resolver(self, req: ResolverInput) -> ResolverOutput:
-        raise NotImplementedError("resolver lands in Phase 3")
+        import asyncio
+
+        import httpx
+
+        from helpdesk.agents.resolver.agent import (
+            JSON_ONLY_SUFFIX,
+            _guard,
+            _parse_text,
+            build_prompt,
+        )
+
+        if req.category == Category.billing:
+            return _resolver_escalation(req, "policy_escalation")
+
+        if self._resolver_url is None:
+            self._resolver_url = self._settings.resolver_responses_url()
+        prompt = build_prompt(req)
+        # TODO(phase4): inject W3C trace context (traceparent/tracestate) here.
+        headers = {"Authorization": f"Bearer {self._token()}"}
+        last_error = "no attempts made"
+
+        # Tool call + query embedding + Search + a second model turn — much slower
+        # than the single-shot classifier.
+        async with httpx.AsyncClient(timeout=120) as client:
+            for attempt in range(1, self._MAX_ATTEMPTS + 1):
+                if attempt > 1:
+                    await asyncio.sleep(self._BACKOFF_SECONDS * (attempt - 1))
+
+                resp = await client.post(
+                    self._resolver_url, json={"input": prompt, "stream": False}, headers=headers
+                )
+                resp.raise_for_status()
+                body = resp.json()
+                logger.debug("remote resolver raw response (attempt %d): %s", attempt, body)
+
+                if body.get("status") == "failed":
+                    err = body.get("error") or {}
+                    last_error = (
+                        f"run failed [{err.get('code')}]: {err.get('message')} "
+                        f"(response id {body.get('id')}, session {body.get('agent_session_id')})"
+                    )
+                    logger.warning("remote resolver attempt %d: %s", attempt, last_error)
+                    continue  # transient — retry with backoff
+
+                text = _extract_responses_text(body)
+                logger.debug("remote resolver extracted text: %r", text)
+                parsed = _parse_text(text, req)
+                if parsed is not None:
+                    return _guard(parsed, req)
+
+                last_error = f"unparseable response text: {text!r}"
+                prompt = build_prompt(req) + JSON_ONLY_SUFFIX
+
+        raise RuntimeError(
+            f"remote resolver failed for {req.request_id!r} after {self._MAX_ATTEMPTS} attempts; "
+            f"last: {last_error}"
+        )
+
+    async def aclose(self) -> None:
+        return None
 
 
 _KEYWORDS: dict[Category, tuple[str, ...]] = {
     Category.billing: ("charge", "invoice", "refund", "subscription", "payment", "license"),
     Category.hr: ("leave", "pto", "vacation", "benefit", "payroll", "paycheck", "parental"),
     Category.support: ("vpn", "password", "login", "laptop", "install", "email", "network"),
+}
+
+# Per-KB keywords for the fake resolver — a hit means "the KB can answer this".
+_KB_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "support": ("vpn", "password", "login", "laptop", "install", "email", "mfa", "software"),
+    "hr": ("pto", "leave", "vacation", "benefit", "parental", "payroll", "enroll", "carryover"),
 }
 
 
@@ -194,4 +294,26 @@ class FakeInvoker:
         )
 
     async def invoke_resolver(self, req: ResolverInput) -> ResolverOutput:
-        raise NotImplementedError("resolver lands in Phase 3")
+        if req.category == Category.billing:
+            return _resolver_escalation(req, "policy_escalation")
+        text = req.message_text.lower()
+        cat = str(req.category)
+        hits = [w for w in _KB_KEYWORDS.get(cat, ()) if w in text]
+        if hits:
+            return ResolverOutput(
+                request_id=req.request_id,
+                status="answered",
+                answer=f"[fake] See the {cat} knowledge base regarding {hits[0]}.",
+                citations=[
+                    Citation(
+                        doc_id=f"{cat}-{hits[0]}",
+                        title=f"{cat} policy > {hits[0]}",
+                        snippet=f"fake snippet about {hits[0]}",
+                        score=0.9,
+                    )
+                ],
+            )
+        return _resolver_escalation(req, "not_grounded")
+
+    async def aclose(self) -> None:
+        return None

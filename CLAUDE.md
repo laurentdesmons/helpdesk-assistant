@@ -52,14 +52,48 @@ IT Help Desk Agent Assistant. LangGraph orchestrator + two Microsoft Agent Frame
     where the data plane 404'd `DeploymentNotFound` on every route while ARM said
     `Succeeded`; it cleared on its own (no recreate needed).
 
-**Next:** Phase 3 — resolver agent (GPT-5.4-mini) wrapping
-`KnowledgeBaseSearch.search()` in an `@ai_function` tool.
+- Phase 3 — **`helpdesk-resolver` deployed and verified.** Built + wired
+  (local/fake/remote).
+  `src/helpdesk/agents/resolver/` (`agent.py` pure builder + `make_search_tool` +
+  `resolve` run helper, `host.py`, `instructions.md`). **`gpt-5.4-mini` on
+  `FoundryChatClient`** (project endpoint). Retrieval = a custom MAF `@tool`
+  `search_knowledge_base` wrapping `KnowledgeBaseSearch.search()` (returns JSON
+  snippets). `default_options` bakes in `response_format` + `tool_choice="required"`
+  (auto-resets to auto after the first tool turn) so the Foundry host — which drops
+  per-request options — still forces one grounded retrieval. Structured output uses
+  a constraint-free `_ResolverDraft` re-validated into `ResolverOutput` client-side
+  (strict schema rejects `min_length`, same reason `Classification` is
+  constraint-free). Billing short-circuits to `policy_escalation` in every invoker
+  before any model/search call; `answered` with no citations → `not_grounded`
+  guard. `main.py` now branches on `HELPDESK_AGENT_ROLE` (classifier|resolver) —
+  both agents deploy the same zip. `resolver` service + RBAC notes in `azure.yaml`;
+  `scripts/run_local_resolver.py`, `verify_deploy.py resolver`,
+  `eval/resolver_eval.py` (code-based: routing accuracy + billing sub-gate +
+  not-grounded recall + citation validity; no judge — real groundedness still
+  blocked on a real KB) + `eval/datasets/resolver_labeled.jsonl` (35 rows).
+  `requirements.txt` gains `azure-search-documents` + `openai`. **`gpt-5.4-mini`
+  scores 100% on the 35-row set both ways** (routing accuracy, billing sub-gate,
+  not-grounded P/R, citation validity, expected-doc hit — all 100%), **100%
+  local↔remote parity (35/35)**. Latency ~5s local, ~15–24s remote. Resolver MI
+  granted `Search Index Data Reader` (Search service) + `Cognitive Services OpenAI
+  User` (account scope, for the embeddings `/openai/v1` route). Deploy gotcha
+  (empty `${VAR}` → `model=""` → 404) fixed with `env_ignore_empty=True` +
+  trimmed `azure.yaml` env — see Deployment.
+
+**Next:** Phase 4 — LangGraph orchestrator (`classify → route → resolve |
+escalate_low_confidence → finalize`) + `AzureAIOpenTelemetryTracer` + trace-context
+propagation verification.
 
 **Not committed yet** — all work is untracked on `main`.
 
 ## Golden rules
 
-- Python 3.11+. Package manager: `uv` (`uv sync`, `uv run`). `pip install -e ".[dev]"` also works.
+- Python 3.11+. Package manager: `uv` (`uv sync`; `uv sync --extra dev` for tests).
+  **Always run scripts, modules, and tools through `uv run`** — `uv run python
+  scripts/…`, `uv run python -m eval.…`, `uv run pytest`, `uv run ruff`, `uv run
+  mypy` — never bare `python`/`pytest` (the sole exception is `azure.yaml`'s
+  `startupCommand: python main.py`, which runs inside the Foundry container where
+  there is no `uv`). `pip install -e ".[dev]"` also works for setup.
 - All shared logic lives in `src/helpdesk/`. `scripts/` and `agents/*/host.py` are
   thin entrypoints only — no business logic.
 - The JSON contracts are defined once, in `src/helpdesk/contracts.py`. Never
@@ -69,10 +103,15 @@ IT Help Desk Agent Assistant. LangGraph orchestrator + two Microsoft Agent Frame
 - Run everything locally with rich logs before deploying. Deploy agents one at a
   time: classifier → resolver → orchestrator, verifying each.
 - Deploy gate: `eval/run_all.py` (Phase 4.5) once it exists. Until then the
-  interim gate is `python -m eval.classifier_eval --gate --min-accuracy 0.94`
-  locally (live model) before deploy, then `HELPDESK_CLASSIFIER_MODE=remote ...
-  --gate --min-accuracy 0.90 --compare <local report>` after deploy (parity must
-  stay ≥ 95%). gpt-4.1-mini currently scores 100% both ways.
+  interim gates are per-agent, run locally (live model) before deploy and in
+  `remote` mode after:
+  - classifier — `uv run python -m eval.classifier_eval --gate --min-accuracy 0.94`,
+    then `HELPDESK_CLASSIFIER_MODE=remote ... --gate --min-accuracy 0.90 --compare
+    <local report>` (parity ≥ 95%). gpt-4.1-mini scores 100% both ways.
+  - resolver — `uv run python -m eval.resolver_eval --gate --min-routing-accuracy
+    0.90` (code-based: routing accuracy, billing sub-gate, not-grounded recall,
+    citation validity), then `HELPDESK_RESOLVER_MODE=remote ... --min-routing-accuracy
+    0.85 --compare <local report>`.
 
 ## Layout
 
@@ -83,11 +122,13 @@ IT Help Desk Agent Assistant. LangGraph orchestrator + two Microsoft Agent Frame
   (`*HostServer` entrypoint), `instructions.md`. (Namespaced under `helpdesk` to
   avoid colliding with the installed top-level `agents` package.)
 - `main.py` (repo root) — the `codeConfiguration.entryPoint` shim for `azd`
-  code-deploy; delegates to the classifier host today.
+  code-deploy; branches on `HELPDESK_AGENT_ROLE` (`classifier` | `resolver`) —
+  both agent services deploy the same zip.
 - `requirements.txt` + `.azdignore` (repo root) — runtime deps + upload excludes
   for `azd deploy` (code mode, `dependencyResolution: remote_build`).
-- `eval/` datasets + evaluators (code-based for classifier, Foundry RAG/agent
-  evaluators for resolver). Gated; needs live models (`RUN_LIVE_EVAL=1`).
+- `eval/` datasets + evaluators (code-based for classifier and resolver alike;
+  the resolver's `--judge` groundedness path is scaffolded behind
+  `azure-ai-evaluation` in the `[eval]` extra, off by default).
 - `scripts/` local drivers with rich logging.
 - `docs/` sample KB — **SAMPLE PLACEHOLDER content, pipeline testing only, NOT real
   policy.** Real KB replaces this before production.
@@ -124,10 +165,18 @@ The LangGraph graph topology is identical in all modes. Per-agent overrides:
   chat/responses but **NOT `/embeddings`** (bare 404). `search/embeddings.py`
   `_account_openai_v1_url()` derives it from `foundry_project_endpoint`. `-small`
   chosen for the small flat KB; revisit `-large` for the real corpus.
-- **Resolver**: GPT-5.4-mini (fallback `gpt-5-mini`) via `FoundryChatClient`.
-  Retrieval is a custom `@ai_function` `search_knowledge_base` tool (NOT the context
+- **Resolver** (Phase 3): `gpt-5.4-mini` (fallback `gpt-5-mini` — manual
+  `HELPDESK_RESOLVER_MODEL` override, the builder does no availability check) via
+  `FoundryChatClient` on the project endpoint. Retrieval is a custom MAF **`@tool`**
+  (`from agent_framework import tool` — `ai_function` is not exported)
+  `search_knowledge_base` wrapping `KnowledgeBaseSearch.search()` (NOT the context
   provider, NOT the hosted search tool) so tool-call spans + explicit context feed
-  the evaluators.
+  the evaluators. `default_options` bakes `response_format` (a constraint-free
+  `_ResolverDraft`, re-validated into `ResolverOutput` client-side) **and**
+  `tool_choice="required"` (auto-resets after the first tool turn) — the Foundry
+  host drops per-request options, so both must be agent defaults. Billing
+  short-circuits to `policy_escalation` in every invoker before any model/search
+  call; `resolve()` downgrades `answered`-without-citations to `not_grounded`.
 - **Eval judge**: `claude-sonnet-5` or full `gpt-5`. NEVER a `*mini*` model as the
   judge (`eval/judges.py` raises if it sees `mini`). Groundedness score quality
   degrades with judge tier.
@@ -138,8 +187,9 @@ The LangGraph graph topology is identical in all modes. Per-agent overrides:
 
 - confidence < `Settings.confidence_threshold` (0.8, tuned in Phase 1) →
   escalate reason `low_confidence`, regardless of category.
-- billing flows through the resolver, which escalates it with reason
-  `policy_escalation` (one place owns billing behaviour).
+- billing is owned by the resolver seam: `invoke_resolver` short-circuits it to
+  `policy_escalation` before any model or search call (README §4 — no resolution
+  attempt), in every invoker (local/remote/fake).
 - resolver not grounded → escalate reason `not_grounded`.
 
 Escalation = an `EscalationRecord` written to the store (JSON file dev, Azure Table
@@ -155,28 +205,31 @@ locally with `text-embedding-3-small` (1536-d, `Settings.embedding_model` /
 docs with vectors; no indexer/skillset. Query = hybrid vector+keyword + semantic
 ranker (`Settings.search_query_type` = `vector_semantic_hybrid` | `vector_hybrid`
 | `keyword`). `KnowledgeBaseSearch.search(category, query)` (`search/client.py`)
-is the Phase 3 resolver seam; `SearchResult.to_citation()` → `contracts.Citation`.
+is the resolver seam — Phase 3's `make_search_tool` wraps it in a MAF `@tool` that
+returns JSON snippets; `SearchResult.to_citation()` → `contracts.Citation`.
 Agentic / Knowledge Base mode is a flag (`Settings.agentic_search`) for when the
-real KB arrives. Build: `python scripts/build_kb.py --recreate`
-(`--dry-run` chunks only, no network). Query: `python scripts/search_kb.py
+real KB arrives. Build: `uv run python scripts/build_kb.py --recreate`
+(`--dry-run` chunks only, no network). Query: `uv run python scripts/search_kb.py
 --category support --query "..."`. Re-evaluate `-large` + integrated vectorization
 when the real KB lands.
 
 ## Common commands
 
+Run scripts and modules through `uv run` (it resolves the project venv).
+
 ```
-uv sync                                       # install (dev: uv sync --extra dev)
-pytest                                         # fast tests (hermetic)
-ruff check . && mypy                            # lint + types
-az login  /  azd auth login                     # auth (DefaultAzureCredential)
-python scripts/run_local_classifier.py --message "..."
-python scripts/run_local_resolver.py --category support --message "..."
-python scripts/run_local_graph.py --message "..." [--mode local|remote]
-python scripts/build_kb.py --recreate           # build search indexes (--dry-run: chunk only)
-python scripts/search_kb.py --category support --query "vpn drops"   # manual KB query
-RUN_LIVE_EVAL=1 python -m eval.run_all           # full eval gate (slow, live models)
-python scripts/verify_deploy.py <agent>          # post-deploy smoke test
-python scripts/verify_trace_propagation.py       # assert one correlated trace
+uv sync                                          # install (dev: uv sync --extra dev)
+uv run pytest                                     # fast tests (hermetic)
+uv run ruff check . && uv run mypy                # lint + types
+az login  /  azd auth login                       # auth (DefaultAzureCredential)
+uv run python scripts/run_local_classifier.py --message "..."
+uv run python scripts/run_local_resolver.py --category support --message "..."
+uv run python scripts/run_local_graph.py --message "..." [--mode local|remote]
+uv run python scripts/build_kb.py --recreate      # build search indexes (--dry-run: chunk only)
+uv run python scripts/search_kb.py --category support --query "vpn drops"   # manual KB query
+RUN_LIVE_EVAL=1 uv run python -m eval.run_all      # full eval gate (slow, live models)
+uv run python scripts/verify_deploy.py <agent>    # post-deploy smoke test
+uv run python scripts/verify_trace_propagation.py # assert one correlated trace
 ```
 
 ## Deployment (azd, one agent at a time)
@@ -188,13 +241,41 @@ separate `manifest.yaml`/`agent.yaml`). Code-deploy mode, `remote_build`.
 azd ext install azure.ai.agents                  # (+ azure.ai.projects)
 azd env select helpdesk-dev
 azd env set HELPDESK_CLASSIFIER_MODEL gpt-4.1-mini
-python -m helpdesk.agents.classifier.host         # raw local host :8088
+uv run python -m helpdesk.agents.classifier.host  # raw local host :8088
 azd ai agent run                                  # local host via startupCommand
 azd ai agent monitor classifier --follow          # stream logs (needs a session id or --follow)
 azd provision --preview  &&  azd provision        # connects to existing helpdesk-dev
 azd deploy classifier                             # single service
-python scripts/verify_deploy.py classifier        # post-deploy smoke test
+uv run python scripts/verify_deploy.py classifier # post-deploy smoke test
 ```
+
+**Resolver (Phase 3)** — same flow. Only two azd env vars are needed
+(`azure.yaml` passes just these; everything else — embedding model, index names,
+semantic config, query type — defaults correctly in `Settings`, and
+`env_ignore_empty=True` means an unset `${VAR}` can't clobber a default):
+
+```
+azd env set HELPDESK_RESOLVER_MODEL gpt-5.4-mini   # or gpt-5-mini if 5.4 isn't enabled
+azd env set HELPDESK_SEARCH_ENDPOINT https://srch-helpdesk-dev-isvx3zxptjnfy.search.windows.net
+azd provision --preview  &&  azd provision        # registers helpdesk-resolver
+azd deploy resolver
+# grant on the resolver agent's managed identity (principalId from `azd env get-values`):
+#   - "Search Index Data Reader"          on srch-helpdesk-dev-isvx3zxptjnfy
+#   - "Cognitive Services OpenAI User"    at the cog-isvx3zxptjnfy account scope (embeddings /openai/v1)
+uv run python scripts/verify_deploy.py resolver
+# tail container logs while smoke-testing (needs a session — invoke once first):
+azd ai agent invoke resolver $'request_id: s1\nCategory: support\nUser request:\nvpn drops'
+azd ai agent monitor resolver --tail 300
+HELPDESK_RESOLVER_MODE=remote uv run python -m eval.resolver_eval --gate \
+  --min-routing-accuracy 0.85 --compare <local report> --min-parity 0.95
+```
+
+**Gotcha (first resolver deploy):** `azure.yaml` env values are `${VAR}`
+substitutions from the azd env; an unset one expands to `""`. Before
+`env_ignore_empty`, that made `HELPDESK_EMBEDDING_MODEL=""` → the container's
+embeddings call went out with `model=""` → 404 `DeploymentNotFound` → every
+support/hr request escalated `not_grounded`. Fix was `env_ignore_empty=True` +
+trimming `azure.yaml` to only the vars that lack a default.
 
 Order: classifier, then resolver, then orchestrator. Verify each before the next.
 Your account is Owner + Foundry User; the deployed agent's MI has implicit

@@ -18,18 +18,18 @@ dependencies = [
     "azure-identity>=1.17",
     # --- Phase 1 deploy: classifier as a Foundry hosted agent ---
     "agent-framework-foundry-hosting",     # pre-release — ResponsesHostServer
-    # --- Phase 2: KB / Azure AI Search (local build + query only; the resolver
-    #     container picks these up in Phase 3 via requirements.txt) ---
+    # --- Phase 2: KB / Azure AI Search. Phase 3: also runtime for the resolver
+    #     container (mirrored into requirements.txt). ---
     "azure-search-documents>=12.1.0b2",    # pre-release — vector + semantic hybrid
     "openai>=1.40",                        # embeddings via AIProjectClient.get_openai_client()
     # Added in later phases:
-    #   Phase 3: azure-ai-evaluation
     #   Phase 4: langgraph, langchain-azure-ai[tools,opentelemetry],
     #            azure-monitor-opentelemetry-exporter (App Insights span export)
 ]
 
 [project.scripts]
 helpdesk-classifier-host = "helpdesk.agents.classifier.host:main"
+helpdesk-resolver-host = "helpdesk.agents.resolver.host:main"
 
 [project.optional-dependencies]
 dev = [
@@ -38,6 +38,11 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.4",
     "mypy>=1.10",
+]
+# LLM-judge groundedness for the resolver eval (README §7). Off by default — the
+# resolver eval is code-based; this is scaffolding until a real KB exists.
+eval = [
+    "azure-ai-evaluation>=1.0.0",
 ]
 
 [build-system]

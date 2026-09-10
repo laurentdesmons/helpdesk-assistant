@@ -6,13 +6,16 @@
 #
 # Services are added as each phase needs them:
 #   Phase 0.5 -> ai-project            (connects to the existing helpdesk-dev project)
-#   Phase 1   -> classifier agent      (this file; model gpt-4.1-mini, portal-managed)
-#   Phase 3   -> resolver agent + gpt-5.4-mini deployment
+#   Phase 1   -> classifier agent      (model gpt-4.1-mini, portal-managed)
+#   Phase 3   -> resolver agent        (model gpt-5.4-mini, portal-managed; RAG over the KB)
 #   Phase 4   -> orchestrator agent
 #
-# Model deployments (gpt-4.1-mini for the classifier, the claude-sonnet-5 eval
-# judge) are created through the Foundry portal Model catalog and referenced here
-# only by deployment name. Infra is synthesized by azd (bicep-less); no infra/ block.
+# The classifier and resolver deploy the same repo zip; HELPDESK_AGENT_ROLE (per
+# service, below) selects which host main.py starts.
+#
+# Model deployments (gpt-4.1-mini, gpt-5.4-mini, the claude-sonnet-5 eval judge)
+# are created through the Foundry portal Model catalog and referenced here only by
+# deployment name. Infra is synthesized by azd (bicep-less); no infra/ block.
 
 requiredVersions:
   azd: ">=1.27.1"
@@ -27,7 +30,8 @@ services:
     host: azure.ai.project
     # Connect to the project provisioned in Phase 0.5 instead of creating a new one.
     endpoint: https://cog-isvx3zxptjnfy.services.ai.azure.com/api/projects/helpdesk-dev
-    # No model deployments here — gpt-4.1-mini is portal-managed; gpt-5.4-mini lands in Phase 3.
+    # No model deployments here — gpt-4.1-mini / gpt-5.4-mini / text-embedding-3-small
+    # are all portal-managed, referenced by deployment name via env vars.
 
   classifier:
     host: azure.ai.agent
@@ -50,9 +54,49 @@ services:
       # platform-injected — do NOT list them here. FoundryChatClient reads the
       # project endpoint from FOUNDRY_PROJECT_ENDPOINT; the agent MI's implicit
       # project-scoped inference access covers the call (no extra RBAC grant).
+      HELPDESK_AGENT_ROLE: classifier
       HELPDESK_CLASSIFIER_MODEL: ${HELPDESK_CLASSIFIER_MODEL}
       HELPDESK_LOG_LEVEL: info
     container:
       resources:
         cpu: "0.5"
         memory: 1Gi
+
+  resolver:
+    host: azure.ai.agent
+    kind: hosted
+    name: helpdesk-resolver             # matches Settings.resolver_agent_name
+    description: IT help desk resolver — RAG over the KB (gpt-5.4-mini).
+    project: .                          # same zip as the classifier
+    uses:
+      - ai-project
+    protocols:
+      - protocol: responses
+        version: 1.0.0
+    codeConfiguration:
+      runtime: python_3_13
+      entryPoint: main.py
+      dependencyResolution: remote_build
+    startupCommand: python main.py
+    env:
+      # FOUNDRY_PROJECT_ENDPOINT + APPLICATIONINSIGHTS_CONNECTION_STRING are
+      # platform-injected. The agent MI's implicit access covers project-scoped
+      # chat inference; it does NOT cover Azure AI Search or the account-level
+      # /openai/v1 embeddings route — grant those on the resolver MI after deploy:
+      #   - "Search Index Data Reader" on the Search service
+      #   - "Cognitive Services OpenAI User" at the account scope (embeddings)
+      #
+      # Only pass what has no correct default. The embedding model, index names,
+      # semantic config, query type, top-k and dimensions all default correctly in
+      # helpdesk.config.Settings — passing an unset ${VAR} here would expand to ""
+      # and (were it not for env_ignore_empty) clobber the default.
+      HELPDESK_AGENT_ROLE: resolver
+      HELPDESK_RESOLVER_MODEL: ${HELPDESK_RESOLVER_MODEL}
+      HELPDESK_SEARCH_ENDPOINT: ${HELPDESK_SEARCH_ENDPOINT}
+      HELPDESK_LOG_LEVEL: info
+    container:
+      resources:
+        # Valid tiers: (0.25, 0.5Gi) (0.5, 1Gi) (1, 2Gi) (2, 4Gi).
+        # 2Gi for the search + embeddings client stack needs the 1-CPU tier.
+        cpu: "1"
+        memory: 2Gi

@@ -56,6 +56,9 @@ def _no_azure(monkeypatch: pytest.MonkeyPatch) -> None:
     import azure.identity
 
     monkeypatch.setattr("helpdesk.agents.classifier.agent.build_classifier_agent", lambda s: object())
+    monkeypatch.setattr(
+        "helpdesk.agents.resolver.agent.build_resolver_agent", lambda *a, **k: object()
+    )
     monkeypatch.setattr(azure.identity, "DefaultAzureCredential", lambda *a, **k: object())
     monkeypatch.setattr(azure.identity, "get_bearer_token_provider", lambda *a, **k: (lambda: "tok"))
 
