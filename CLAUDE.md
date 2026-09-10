@@ -80,9 +80,37 @@ IT Help Desk Agent Assistant. LangGraph orchestrator + two Microsoft Agent Frame
   (empty `${VAR}` → `model=""` → 404) fixed with `env_ignore_empty=True` +
   trimmed `azure.yaml` env — see Deployment.
 
-**Next:** Phase 4 — LangGraph orchestrator (`classify → route → resolve |
-escalate_low_confidence → finalize`) + `AzureAIOpenTelemetryTracer` + trace-context
-propagation verification.
+- Phase 4 (part 1) — **LangGraph orchestrator built + verified locally, not
+  deployed.** `src/helpdesk/agents/orchestrator/` (`graph.py` pure
+  `build_graph(settings, invoker=…)` + `run_graph`; `host.py` `_GraphAgent`
+  `SupportsAgentRun` shim over the compiled graph for `ResponsesHostServer`;
+  `instructions.md`). Nodes `classify → route → resolve | escalate_low_confidence
+  → finalize`; `route` is a pass-through, the conditional edge sends
+  `confidence < confidence_threshold` (0.8) → `escalate_low_confidence` (any
+  category), else `resolve`. Billing is **not** special-cased in the graph — the
+  `agent_gateway` seam short-circuits it. `finalize` is the single I/O point:
+  builds `HelpdeskResult`, writes an `EscalationRecord` on any escalation.
+  `src/helpdesk/tracing.py` (`build_tracer` = `AzureAIOpenTelemetryTracer`, no-op
+  export without an App Insights conn string but still emits spans;
+  `configure_tracing` installs an OTel-SDK `TracerProvider` +
+  `TraceIdRatioBased` sampler). `agent_gateway` gains `inject(headers)` on both
+  `RemoteInvoker` calls (W3C `traceparent`), `CompositeInvoker`, and
+  `build_graph_invoker(settings, mode=None)` (per-agent modes in one graph run).
+  `scripts/run_local_graph.py`, `eval/orchestrator_eval.py` (code-based: outcome
+  accuracy + billing sub-gate + low_confidence recall + citation validity +
+  escalation-record written) + `eval/datasets/orchestrator_scenarios.jsonl`
+  (14 rows, all 5 outcomes). `agent_role` widened to `orchestrator`; `main.py`
+  branch; `orchestrator` service in `azure.yaml` (written, **not `azd`-deployed**).
+  `pyproject.toml` / `requirements.txt` gain `langgraph`, `langchain-azure-ai
+  [opentelemetry]`, `opentelemetry-sdk`. **Fake-invoker classifier confidence
+  bumped to ≥ 0.85 on a keyword hit** (a clear match must not trip
+  low_confidence) and the fake resolver now cites real `docs/` doc_ids. **100%
+  outcome accuracy on the 14-row set, fake + in-process.**
+
+**Next:** Phase 4 part 2 — deploy `helpdesk-orchestrator` (grant `Azure AI User`
+on the project to its MI), `HELPDESK_AGENT_MODE=remote` end-to-end eval +
+local↔remote parity, `scripts/verify_trace_propagation.py` (one correlated trace
+across all three agents). Then Phase 4.5 — `eval/run_all.py`.
 
 **Not committed yet** — all work is untracked on `main`.
 
@@ -112,23 +140,34 @@ propagation verification.
     0.90` (code-based: routing accuracy, billing sub-gate, not-grounded recall,
     citation validity), then `HELPDESK_RESOLVER_MODE=remote ... --min-routing-accuracy
     0.85 --compare <local report>`.
+  - orchestrator — `uv run python -m eval.orchestrator_eval --gate
+    --min-outcome-accuracy 0.90` (outcome accuracy, billing sub-gate,
+    low_confidence recall, citation validity, escalation-record written), then
+    `HELPDESK_CLASSIFIER_MODE=remote HELPDESK_RESOLVER_MODE=remote ...
+    --min-outcome-accuracy 0.85 --compare <local report>` (part 2, needs the
+    agents deployed; the orchestrator itself still runs in-process).
 
 ## Layout
 
-- `src/helpdesk/` shared lib: `contracts`, `config`, `logging`, `tracing` (P4),
-  `agent_gateway` (P1), `escalation`, `search/` (P2).
-- `src/helpdesk/agents/{classifier,resolver,orchestrator}/` — one independently
-  deployable agent each: `agent.py` (pure builder + run helpers), `host.py`
-  (`*HostServer` entrypoint), `instructions.md`. (Namespaced under `helpdesk` to
-  avoid colliding with the installed top-level `agents` package.)
+- `src/helpdesk/` shared lib: `contracts`, `config`, `logging`, `tracing` (P4 —
+  `build_tracer` + `configure_tracing`), `agent_gateway` (P1 — invokers +
+  `CompositeInvoker` / `build_graph_invoker`), `escalation`, `search/` (P2).
+- `src/helpdesk/agents/{classifier,resolver}/` — `agent.py` (pure builder + run
+  helpers), `host.py` (`ResponsesHostServer` entrypoint), `instructions.md`.
+  `src/helpdesk/agents/orchestrator/` — `graph.py` (pure `build_graph` +
+  `run_graph`, no `agent.py`), `host.py` (`_GraphAgent` shim + `ResponsesHostServer`),
+  `instructions.md`. (Namespaced under `helpdesk` to avoid colliding with the
+  installed top-level `agents` package.)
 - `main.py` (repo root) — the `codeConfiguration.entryPoint` shim for `azd`
-  code-deploy; branches on `HELPDESK_AGENT_ROLE` (`classifier` | `resolver`) —
-  both agent services deploy the same zip.
+  code-deploy; branches on `HELPDESK_AGENT_ROLE` (`classifier` | `resolver` |
+  `orchestrator`) — all three services deploy the same zip.
 - `requirements.txt` + `.azdignore` (repo root) — runtime deps + upload excludes
   for `azd deploy` (code mode, `dependencyResolution: remote_build`).
-- `eval/` datasets + evaluators (code-based for classifier and resolver alike;
-  the resolver's `--judge` groundedness path is scaffolded behind
-  `azure-ai-evaluation` in the `[eval]` extra, off by default).
+- `eval/` datasets + evaluators (code-based for classifier, resolver, and
+  orchestrator alike; the resolver's `--judge` groundedness path is scaffolded
+  behind `azure-ai-evaluation` in the `[eval]` extra, off by default).
+  `orchestrator_eval.py` runs each scenario through the whole graph and writes
+  escalation records to a throwaway store.
 - `scripts/` local drivers with rich logging.
 - `docs/` sample KB — **SAMPLE PLACEHOLDER content, pipeline testing only, NOT real
   policy.** Real KB replaces this before production.
@@ -143,12 +182,16 @@ propagation verification.
 - **local**: classifier & resolver run in-process as MAF `Agent` objects.
 - **remote**: `RemoteInvoker` calls the deployed Foundry agents by raw async
   httpx POST to each agent's `.../endpoint/protocols/openai/responses` URL, with a
-  `DefaultAzureCredential` bearer token (scope `https://ai.azure.com/.default`).
-  Phase 4 may switch to `langchain-azure-ai`'s agent node and inject `traceparent`.
-- **fake**: deterministic stubs for `tests/`.
+  `DefaultAzureCredential` bearer token (scope `https://ai.azure.com/.default`)
+  and an injected W3C `traceparent` (`opentelemetry.propagate.inject`).
+- **fake**: deterministic stubs for `tests/` (keyword classifier — a keyword hit
+  scores ≥ 0.85 so the orchestrator routes it; fake resolver cites real `docs/`
+  doc_ids).
 
 The LangGraph graph topology is identical in all modes. Per-agent overrides:
-`HELPDESK_CLASSIFIER_MODE`, `HELPDESK_RESOLVER_MODE`.
+`HELPDESK_CLASSIFIER_MODE`, `HELPDESK_RESOLVER_MODE` — the orchestrator builds a
+`CompositeInvoker` (via `build_graph_invoker`) that honours each independently, so
+the graph can run against the deployed agents while itself in-process.
 
 ## Models
 
@@ -183,17 +226,22 @@ The LangGraph graph topology is identical in all modes. Per-agent overrides:
 
 ## Routing (orchestrator)
 
-`classify → route → resolve | escalate_low_confidence → finalize`.
+`classify → route → resolve | escalate_low_confidence → finalize`
+(`src/helpdesk/agents/orchestrator/graph.py`). `route` is a pass-through node; the
+branch is `add_conditional_edges`. `run_graph(graph, request, *, tracer=None)`
+returns a `HelpdeskResult`.
 
 - confidence < `Settings.confidence_threshold` (0.8, tuned in Phase 1) →
-  escalate reason `low_confidence`, regardless of category.
+  `escalate_low_confidence` → reason `low_confidence`, regardless of category
+  (resolver never called).
 - billing is owned by the resolver seam: `invoke_resolver` short-circuits it to
   `policy_escalation` before any model or search call (README §4 — no resolution
-  attempt), in every invoker (local/remote/fake).
+  attempt), in every invoker (local/remote/fake). The graph does **not**
+  special-case it.
 - resolver not grounded → escalate reason `not_grounded`.
 
-Escalation = an `EscalationRecord` written to the store (JSON file dev, Azure Table
-prod).
+Escalation = an `EscalationRecord` written to the store in `finalize` — the
+graph's single I/O point (JSON file dev, Azure Table prod).
 
 ## KB / search
 
@@ -224,12 +272,13 @@ uv run ruff check . && uv run mypy                # lint + types
 az login  /  azd auth login                       # auth (DefaultAzureCredential)
 uv run python scripts/run_local_classifier.py --message "..."
 uv run python scripts/run_local_resolver.py --category support --message "..."
-uv run python scripts/run_local_graph.py --message "..." [--mode local|remote]
+uv run python scripts/run_local_graph.py --message "..." [--mode local|remote|fake]
+uv run python -m eval.orchestrator_eval --gate    # end-to-end routing matrix
 uv run python scripts/build_kb.py --recreate      # build search indexes (--dry-run: chunk only)
 uv run python scripts/search_kb.py --category support --query "vpn drops"   # manual KB query
-RUN_LIVE_EVAL=1 uv run python -m eval.run_all      # full eval gate (slow, live models)
+RUN_LIVE_EVAL=1 uv run python -m eval.run_all      # full eval gate (Phase 4.5 — not yet)
 uv run python scripts/verify_deploy.py <agent>    # post-deploy smoke test
-uv run python scripts/verify_trace_propagation.py # assert one correlated trace
+uv run python scripts/verify_trace_propagation.py # assert one correlated trace (Phase 4 part 2)
 ```
 
 ## Deployment (azd, one agent at a time)
@@ -270,6 +319,13 @@ HELPDESK_RESOLVER_MODE=remote uv run python -m eval.resolver_eval --gate \
   --min-routing-accuracy 0.85 --compare <local report> --min-parity 0.95
 ```
 
+**Orchestrator (Phase 4 part 2 — not done yet)** — same flow. No model of its
+own; it calls the two deployed agents (`HELPDESK_AGENT_MODE=remote`, endpoints
+passed as `${AGENT_{CLASSIFIER,RESOLVER}_RESPONSES_ENDPOINT}` in `azure.yaml`).
+After `azd deploy orchestrator`, grant its MI `Azure AI User` on the project,
+then `verify_deploy.py orchestrator` + `verify_trace_propagation.py`. Local host:
+`uv run python -m helpdesk.agents.orchestrator.host`.
+
 **Gotcha (first resolver deploy):** `azure.yaml` env values are `${VAR}`
 substitutions from the azd env; an unset one expands to `""`. Before
 `env_ignore_empty`, that made `HELPDESK_EMBEDDING_MODEL=""` → the container's
@@ -287,12 +343,17 @@ no RBAC grant is needed. Runtime injects `FOUNDRY_PROJECT_ENDPOINT` and
 
 ## Tracing
 
-`AzureAIOpenTelemetryTracer` (from `langchain-azure-ai`) attached to the compiled
-graph. All three agents must share one App Insights connection string. Trace-context
-propagation across the orchestrator→agent calls is VERIFIED in Phase 4, not
-assumed — see `scripts/verify_trace_propagation.py`. View: Azure Monitor →
-Investigate → Agents (Preview) for the graph; Foundry portal → Observability →
-Traces for agent spans.
+`src/helpdesk/tracing.py`: `build_tracer(settings)` returns an
+`AzureAIOpenTelemetryTracer` (from `langchain-azure-ai`), or `None` when
+`HELPDESK_TRACING_ENABLED=false`. `run_graph` attaches it as a callback
+(`config={"callbacks": [tracer]}`). With an App Insights connection string set the
+tracer auto-configures Azure Monitor export; without one it still emits spans on a
+local `TracerProvider` that `configure_tracing` installs (enough for `trace=` in
+logs + `traceparent` on the `RemoteInvoker` calls). All three agents must share
+one App Insights connection string. Trace-context propagation across the
+orchestrator→agent calls is VERIFIED in Phase 4 part 2, not assumed — see
+`scripts/verify_trace_propagation.py`. View: Azure Monitor → Investigate → Agents
+(Preview) for the graph; Foundry portal → Observability → Traces for agent spans.
 
 ## Do not
 

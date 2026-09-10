@@ -22,9 +22,11 @@ dependencies = [
     #     container (mirrored into requirements.txt). ---
     "azure-search-documents>=12.1.0b2",    # pre-release — vector + semantic hybrid
     "openai>=1.40",                        # embeddings via AIProjectClient.get_openai_client()
-    # Added in later phases:
-    #   Phase 4: langgraph, langchain-azure-ai[tools,opentelemetry],
-    #            azure-monitor-opentelemetry-exporter (App Insights span export)
+    # --- Phase 4: LangGraph orchestrator + tracing ---
+    "langgraph>=1.2",
+    "langchain-core>=1.0",
+    "langchain-azure-ai[opentelemetry]>=1.2",  # AzureAIOpenTelemetryTracer + App Insights export
+    "opentelemetry-sdk>=1.24",                 # TracerProvider / sampler for traceparent propagation
 ]
 
 [project.scripts]
@@ -38,6 +40,7 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.4",
     "mypy>=1.10",
+    "azure-monitor-query>=1.4",  # Phase 4 (deploy iteration): verify_trace_propagation.py
 ]
 # LLM-judge groundedness for the resolver eval (README §7). Off by default — the
 # resolver eval is code-based; this is scaffolding until a real KB exists.
@@ -77,7 +80,11 @@ strict = true
 warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
-module = ["agent_framework_foundry_hosting.*"]
+module = [
+    "agent_framework_foundry_hosting.*",
+    "langgraph.*",
+    "langchain_azure_ai.*",
+]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

@@ -1,17 +1,21 @@
 # IT Help Desk Agent Assistant — Design Doc
 
-*Living document, updated each phase. Current: Phase 3 — **`helpdesk-resolver`
-deployed and verified.** `src/helpdesk/agents/resolver/` = `gpt-5.4-mini` on
-`FoundryChatClient` + a custom MAF `@tool` `search_knowledge_base` wrapping the
-Phase 2 `KnowledgeBaseSearch.search()`; `response_format` + `tool_choice="required"`
-baked into the agent defaults; billing short-circuits to `policy_escalation`,
-`answered`-without-citations downgrades to `not_grounded`.
-`scripts/run_local_resolver.py`, `eval/resolver_eval.py` (code-based) + a 35-row
-labeled set, `verify_deploy.py resolver`, `main.py` role switch, `resolver`
-service in `azure.yaml`. **gpt-5.4-mini scores 100% on every metric, in-process
-and through the deployed endpoint, with 100% local↔remote parity (35/35).**
-Previous: Phase 2 — KB / Azure AI Search layer, verified end-to-end. Next: Phase 4
-(LangGraph orchestrator + tracing).*
+*Living document, updated each phase. Current: Phase 4 (part 1) — **LangGraph
+orchestrator built and verified locally, not yet deployed.**
+`src/helpdesk/agents/orchestrator/` = `graph.py` (`classify → route → resolve |
+escalate_low_confidence → finalize`, pure `build_graph(settings, invoker=…)` +
+`run_graph`) + `host.py` (a `SupportsAgentRun` shim over the compiled graph for
+`ResponsesHostServer`). `src/helpdesk/tracing.py` = `AzureAIOpenTelemetryTracer`
+factory + OTel-SDK setup; `RemoteInvoker` now injects W3C `traceparent` on the
+agent calls. `agent_gateway.CompositeInvoker` / `build_graph_invoker` let the
+classifier and resolver run at different modes in one graph run.
+`scripts/run_local_graph.py`, `eval/orchestrator_eval.py` (code-based) + a 14-row
+scenario set, `orchestrator` service in `azure.yaml` (written, not `azd`-deployed).
+**100% outcome accuracy on the scenario set (fake + in-process); local↔remote
+parity and App Insights trace-propagation verification land with the deploy
+(part 2).** Previous: Phase 3 — `helpdesk-resolver` deployed and verified. Next:
+Phase 4 part 2 (deploy orchestrator #3 + `verify_trace_propagation.py`), then
+Phase 4.5 (`eval/run_all.py` gate).*
 
 ## 1. Category taxonomy
 - `billing`
@@ -37,6 +41,33 @@ LangGraph orchestrator (hosted agent in Foundry)
 - LangGraph is the orchestrator, itself packaged as a hosted agent in Foundry, calling both directly via each agent's own Responses/Invocations protocol endpoint — plain HTTP call, no A2A. Reasoning: A2A on Foundry is preview-only and Microsoft explicitly doesn't recommend it for production; we don't need its discovery/negotiation layer since LangGraph already knows exactly which agent to call. Auth via managed identity (standard Foundry-to-Foundry call).
 - Escalation = **flagged state**, no ticketing system integration — a human picks the request up from a queue/UI (mechanism TBD, Phase 5).
 - Tracing: `langchain-azure-ai`'s `AzureAIOpenTelemetryTracer` attached to the LangGraph app, emitting per-node/edge OTel spans to Application Insights, visible in Foundry Observability > Traces. Each Foundry-hosted agent (Classifier, Resolver) also emits its own spans natively. Trace context propagation across the direct endpoint calls (so all three show up correlated under one trace) needs explicit verification in Phase 4 — not assumed.
+
+**Phase 4 (part 1) build.** `src/helpdesk/agents/orchestrator/graph.py` is a pure
+`build_graph(settings, *, invoker)` compiling the `StateGraph`
+(`classify → route → resolve | escalate_low_confidence → finalize`) plus
+`run_graph(graph, request, *, tracer=None)`; the caller owns the invoker's
+lifetime (mirrors `build_resolver_agent(settings, kb=…)`). `route` is a pass-through
+node; the conditional edge sends `confidence < confidence_threshold` (0.8) to
+`escalate_low_confidence` regardless of category, everything else to `resolve`.
+Billing is *not* special-cased in the graph — `agent_gateway.invoke_resolver`
+short-circuits it to `policy_escalation` (§4). `finalize` is the graph's single
+I/O point: it assembles the top-level `HelpdeskResult` (`contracts.py`) and, on
+any escalation, writes an `EscalationRecord` to the store (§6). `host.py` wraps
+the compiled graph in a minimal `SupportsAgentRun` shim (`_GraphAgent`) so the
+existing `ResponsesHostServer` can host it — same deploy zip, `main.py` selects on
+`HELPDESK_AGENT_ROLE=orchestrator`. `src/helpdesk/tracing.py` builds the tracer
+(no-op export when no App Insights connection string; still emits spans locally)
+and installs an OTel-SDK `TracerProvider` so `RemoteInvoker`'s
+`opentelemetry.propagate.inject` produces a real `traceparent` on the
+classifier/resolver calls. `agent_gateway.CompositeInvoker` +
+`build_graph_invoker(settings, mode=None)` let each agent follow its own
+`HELPDESK_{CLASSIFIER,RESOLVER}_MODE` in one graph run — how the graph is
+exercised against the deployed agents before the orchestrator itself deploys.
+`scripts/run_local_graph.py` drives it; `eval/orchestrator_eval.py` +
+`eval/datasets/orchestrator_scenarios.jsonl` (14 rows, all 5 outcomes) gate
+outcome accuracy, a billing sub-gate, low_confidence recall, citation validity,
+and that every escalation wrote a record. Deploy + `verify_trace_propagation.py`
+are part 2.
 
 ## 3. Classifier Agent — contract
 

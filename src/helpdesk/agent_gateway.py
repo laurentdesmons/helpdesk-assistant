@@ -21,6 +21,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Protocol
 
+from opentelemetry.propagate import inject
+
 from helpdesk.config import AgentMode, Settings
 from helpdesk.contracts import (
     Category,
@@ -64,6 +66,47 @@ def build_invoker(settings: Settings, mode: AgentMode | None = None) -> AgentInv
     if mode == "remote":
         return RemoteInvoker(settings)
     raise ValueError(f"unknown agent mode: {mode!r}")
+
+
+class CompositeInvoker:
+    """One invoker per agent, each at its own effective mode.
+
+    The orchestrator graph holds a single :class:`AgentInvoker`; this lets the
+    classifier and resolver run at different modes in the same graph run —
+    ``HELPDESK_CLASSIFIER_MODE=remote`` with the resolver still ``local``, say,
+    which is how the graph is exercised against the deployed agents before the
+    orchestrator itself is deployed.
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        c_mode = settings.mode_for("classifier")
+        r_mode = settings.mode_for("resolver")
+        self._classifier = build_invoker(settings, c_mode)
+        # Reuse the one instance when both agents resolve to the same mode.
+        self._resolver = self._classifier if r_mode == c_mode else build_invoker(settings, r_mode)
+
+    async def invoke_classifier(self, req: ClassifierInput) -> Classification:
+        return await self._classifier.invoke_classifier(req)
+
+    async def invoke_resolver(self, req: ResolverInput) -> ResolverOutput:
+        return await self._resolver.invoke_resolver(req)
+
+    async def aclose(self) -> None:
+        await self._classifier.aclose()
+        if self._resolver is not self._classifier:
+            await self._resolver.aclose()
+
+
+def build_graph_invoker(settings: Settings, mode: AgentMode | None = None) -> AgentInvoker:
+    """The invoker the orchestrator graph runs on.
+
+    ``mode`` forces both agents to one mode (the ``scripts/run_local_graph.py
+    --mode`` path); omitted, each agent follows its own
+    ``HELPDESK_{CLASSIFIER,RESOLVER}_MODE`` override.
+    """
+    if mode is not None:
+        return build_invoker(settings, mode)
+    return CompositeInvoker(settings)
 
 
 class LocalInvoker:
@@ -143,8 +186,9 @@ class RemoteInvoker:
         self._resolver_url: str | None = None
         self._token = get_bearer_token_provider(DefaultAzureCredential(), _AGENT_SCOPE)
 
-    # Attempts share one budget: transient server errors (model overload/throttle)
-    # and unparseable responses both consume a try, with a short backoff between.
+    # Attempts share one budget: transient server errors (model overload/throttle),
+    # httpx transport errors (cross-region read timeouts), and unparseable
+    # responses all consume a try, with a short backoff between.
     _MAX_ATTEMPTS = 4
     _BACKOFF_SECONDS = 2.0
 
@@ -156,8 +200,11 @@ class RemoteInvoker:
         from helpdesk.agents.classifier.agent import JSON_ONLY_SUFFIX, _parse_text, build_prompt
 
         prompt = build_prompt(req)
-        # TODO(phase4): inject W3C trace context (traceparent/tracestate) here.
+        # W3C trace context: chain the deployed classifier's spans under the
+        # orchestrator node span (README §2 — "not assumed"). No-op when no span
+        # is active (local/fake, or tracing disabled).
         headers = {"Authorization": f"Bearer {self._token()}"}
+        inject(headers)
         last_error = "no attempts made"
 
         async with httpx.AsyncClient(timeout=60) as client:
@@ -165,11 +212,18 @@ class RemoteInvoker:
                 if attempt > 1:
                     await asyncio.sleep(self._BACKOFF_SECONDS * (attempt - 1))
 
-                resp = await client.post(
-                    self._classifier_url, json={"input": prompt, "stream": False}, headers=headers
-                )
-                resp.raise_for_status()
-                body = resp.json()
+                try:
+                    resp = await client.post(
+                        self._classifier_url,
+                        json={"input": prompt, "stream": False},
+                        headers=headers,
+                    )
+                    resp.raise_for_status()
+                    body = resp.json()
+                except httpx.HTTPError as exc:  # timeout / connect / 5xx — transient
+                    last_error = f"{type(exc).__name__}: {exc}"
+                    logger.warning("remote classifier attempt %d: %s", attempt, last_error)
+                    continue
                 logger.debug("remote classifier raw response (attempt %d): %s", attempt, body)
 
                 if body.get("status") == "failed":
@@ -213,8 +267,9 @@ class RemoteInvoker:
         if self._resolver_url is None:
             self._resolver_url = self._settings.resolver_responses_url()
         prompt = build_prompt(req)
-        # TODO(phase4): inject W3C trace context (traceparent/tracestate) here.
+        # W3C trace context — see invoke_classifier. No-op without an active span.
         headers = {"Authorization": f"Bearer {self._token()}"}
+        inject(headers)
         last_error = "no attempts made"
 
         # Tool call + query embedding + Search + a second model turn — much slower
@@ -224,11 +279,18 @@ class RemoteInvoker:
                 if attempt > 1:
                     await asyncio.sleep(self._BACKOFF_SECONDS * (attempt - 1))
 
-                resp = await client.post(
-                    self._resolver_url, json={"input": prompt, "stream": False}, headers=headers
-                )
-                resp.raise_for_status()
-                body = resp.json()
+                try:
+                    resp = await client.post(
+                        self._resolver_url,
+                        json={"input": prompt, "stream": False},
+                        headers=headers,
+                    )
+                    resp.raise_for_status()
+                    body = resp.json()
+                except httpx.HTTPError as exc:  # timeout / connect / 5xx — transient
+                    last_error = f"{type(exc).__name__}: {exc}"
+                    logger.warning("remote resolver attempt %d: %s", attempt, last_error)
+                    continue
                 logger.debug("remote resolver raw response (attempt %d): %s", attempt, body)
 
                 if body.get("status") == "failed":
@@ -264,10 +326,28 @@ _KEYWORDS: dict[Category, tuple[str, ...]] = {
     Category.support: ("vpn", "password", "login", "laptop", "install", "email", "network"),
 }
 
-# Per-KB keywords for the fake resolver — a hit means "the KB can answer this".
-_KB_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "support": ("vpn", "password", "login", "laptop", "install", "email", "mfa", "software"),
-    "hr": ("pto", "leave", "vacation", "benefit", "parental", "payroll", "enroll", "carryover"),
+# Per-KB keyword -> real ``docs/`` doc_id (stem) for the fake resolver. A hit means
+# "the KB can answer this"; the doc_id is a genuine chunk id so citation-validity
+# checks pass in fake mode too.
+_KB_DOC_FOR: dict[str, dict[str, str]] = {
+    "support": {
+        "vpn": "vpn-troubleshooting",
+        "password": "password-reset-policy",
+        "login": "password-reset-policy",
+        "mfa": "password-reset-policy",
+        "install": "software-install-requests",
+        "software": "software-install-requests",
+        "laptop": "software-install-requests",
+    },
+    "hr": {
+        "pto": "pto-policy",
+        "vacation": "pto-policy",
+        "carryover": "pto-policy",
+        "leave": "parental-leave-policy",
+        "parental": "parental-leave-policy",
+        "benefit": "benefits-enrollment-guide",
+        "enroll": "benefits-enrollment-guide",
+    },
 }
 
 
@@ -284,7 +364,10 @@ class FakeInvoker:
             if hits:
                 return Classification(
                     category=category,
-                    confidence=min(0.95, 0.6 + 0.1 * len(hits)),
+                    # >= 0.85 on a single keyword hit — a clear match is not
+                    # low-confidence, so the orchestrator routes it to resolve
+                    # rather than escalating it.
+                    confidence=min(0.95, 0.75 + 0.1 * len(hits)),
                     rationale=f"matched keywords: {', '.join(hits)}",
                 )
         return Classification(
@@ -298,17 +381,18 @@ class FakeInvoker:
             return _resolver_escalation(req, "policy_escalation")
         text = req.message_text.lower()
         cat = str(req.category)
-        hits = [w for w in _KB_KEYWORDS.get(cat, ()) if w in text]
+        hits = [(w, doc) for w, doc in _KB_DOC_FOR.get(cat, {}).items() if w in text]
         if hits:
+            keyword, doc_id = hits[0]
             return ResolverOutput(
                 request_id=req.request_id,
                 status="answered",
-                answer=f"[fake] See the {cat} knowledge base regarding {hits[0]}.",
+                answer=f"[fake] See the {cat} knowledge base regarding {keyword}.",
                 citations=[
                     Citation(
-                        doc_id=f"{cat}-{hits[0]}",
-                        title=f"{cat} policy > {hits[0]}",
-                        snippet=f"fake snippet about {hits[0]}",
+                        doc_id=doc_id,
+                        title=f"{cat} policy > {keyword}",
+                        snippet=f"fake snippet about {keyword}",
                         score=0.9,
                     )
                 ],

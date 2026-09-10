@@ -25,5 +25,10 @@ python-dotenv>=1.0
 rich>=13.7
 httpx>=0.27
 opentelemetry-api>=1.24
+# Phase 4: the orchestrator container runs the LangGraph app + AzureAIOpenTelemetryTracer.
+langgraph>=1.2
+langchain-core>=1.0
+langchain-azure-ai[opentelemetry]>=1.2
+opentelemetry-sdk>=1.24
 
 .

@@ -8,10 +8,10 @@
 #   Phase 0.5 -> ai-project            (connects to the existing helpdesk-dev project)
 #   Phase 1   -> classifier agent      (model gpt-4.1-mini, portal-managed)
 #   Phase 3   -> resolver agent        (model gpt-5.4-mini, portal-managed; RAG over the KB)
-#   Phase 4   -> orchestrator agent
+#   Phase 4   -> orchestrator agent    (LangGraph; calls classifier + resolver remotely)
 #
-# The classifier and resolver deploy the same repo zip; HELPDESK_AGENT_ROLE (per
-# service, below) selects which host main.py starts.
+# All three services deploy the same repo zip; HELPDESK_AGENT_ROLE (per service,
+# below) selects which host main.py starts.
 #
 # Model deployments (gpt-4.1-mini, gpt-5.4-mini, the claude-sonnet-5 eval judge)
 # are created through the Foundry portal Model catalog and referenced here only by
@@ -98,5 +98,40 @@ services:
       resources:
         # Valid tiers: (0.25, 0.5Gi) (0.5, 1Gi) (1, 2Gi) (2, 4Gi).
         # 2Gi for the search + embeddings client stack needs the 1-CPU tier.
+        cpu: "1"
+        memory: 2Gi
+
+  orchestrator:
+    host: azure.ai.agent
+    kind: hosted
+    name: helpdesk-orchestrator          # matches Settings.orchestrator_agent_name
+    description: IT help desk orchestrator — LangGraph classify -> route -> resolve | escalate.
+    project: .                           # same zip as the classifier / resolver
+    uses:
+      - ai-project
+    protocols:
+      - protocol: responses
+        version: 1.0.0
+    codeConfiguration:
+      runtime: python_3_13
+      entryPoint: main.py
+      dependencyResolution: remote_build
+    startupCommand: python main.py
+    env:
+      # FOUNDRY_PROJECT_ENDPOINT + APPLICATIONINSIGHTS_CONNECTION_STRING are
+      # platform-injected. The orchestrator holds no model itself — it calls the
+      # deployed classifier + resolver agents over their Responses endpoints
+      # (HELPDESK_AGENT_MODE=remote). azd writes AGENT_{CLASSIFIER,RESOLVER}_
+      # RESPONSES_ENDPOINT to the env after those two deploy; pass them through.
+      # The orchestrator MI needs "Azure AI User" on the project (invoke the
+      # sibling agents) — grant after deploy.
+      HELPDESK_AGENT_ROLE: orchestrator
+      HELPDESK_AGENT_MODE: remote
+      HELPDESK_CLASSIFIER_AGENT_ENDPOINT: ${AGENT_CLASSIFIER_RESPONSES_ENDPOINT}
+      HELPDESK_RESOLVER_AGENT_ENDPOINT: ${AGENT_RESOLVER_RESPONSES_ENDPOINT}
+      HELPDESK_LOG_LEVEL: info
+    container:
+      resources:
+        # LangGraph + two async httpx client stacks; no local model/search.
         cpu: "1"
         memory: 2Gi

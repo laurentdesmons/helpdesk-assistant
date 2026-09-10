@@ -155,6 +155,92 @@ def test_extract_responses_text_nested_walk() -> None:
     assert _extract_responses_text({"output": []}) is None
 
 
+async def test_remote_invoker_retries_on_transport_error(
+    _remote: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import httpx
+
+    invoker, calls, _replies = _remote
+    real_post = httpx.AsyncClient.post
+    state = {"first": True}
+
+    async def flaky_post(self: Any, url: str, **kwargs: Any) -> Any:
+        if state["first"]:
+            state["first"] = False
+            raise httpx.ReadTimeout("cross-region stall")
+        return await real_post(self, url, **kwargs)
+
+    monkeypatch.setattr("httpx.AsyncClient.post", flaky_post)
+    res = await invoker.invoke_classifier(_req("I was charged twice"))
+    assert res.category == Category.billing
+    assert len(calls) == 1  # the successful retry
+
+
+async def test_remote_invoker_injects_trace_context(_remote: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    invoker, _calls, _replies = _remote
+    seen: list[dict[str, str]] = []
+    monkeypatch.setattr("helpdesk.agent_gateway.inject", lambda carrier: seen.append(carrier))
+
+    await invoker.invoke_classifier(_req("I was charged twice"))
+
+    assert len(seen) == 1
+    assert seen[0]["Authorization"] == "Bearer fake-token"  # inject got the real header dict
+
+
+# --------------------------------------------------------------------------- #
+# CompositeInvoker / build_graph_invoker
+# --------------------------------------------------------------------------- #
+def test_composite_invoker_reuses_one_instance_when_modes_match() -> None:
+    from helpdesk.agent_gateway import CompositeInvoker
+
+    ci = CompositeInvoker(Settings(_env_file=None, agent_mode="fake"))  # type: ignore[call-arg]
+    assert ci._resolver is ci._classifier
+    assert isinstance(ci._classifier, FakeInvoker)
+
+
+@pytest.mark.usefixtures("_no_azure")
+def test_composite_invoker_splits_on_per_agent_mode() -> None:
+    from helpdesk.agent_gateway import CompositeInvoker
+
+    ci = CompositeInvoker(
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            classifier_mode="fake",
+            resolver_mode="local",
+            foundry_project_endpoint="https://x.services.ai.azure.com/api/projects/p",
+        )
+    )
+    assert isinstance(ci._classifier, FakeInvoker)
+    assert isinstance(ci._resolver, LocalInvoker)
+
+
+def test_build_graph_invoker_dispatch() -> None:
+    from helpdesk.agent_gateway import CompositeInvoker, build_graph_invoker
+
+    s = Settings(_env_file=None, agent_mode="fake")  # type: ignore[call-arg]
+    assert isinstance(build_graph_invoker(s, "fake"), FakeInvoker)
+    assert isinstance(build_graph_invoker(s), CompositeInvoker)
+
+
+async def test_composite_invoker_aclose_closes_both() -> None:
+    from helpdesk.agent_gateway import CompositeInvoker
+
+    closed: list[str] = []
+
+    class _Closer:
+        def __init__(self, tag: str) -> None:
+            self._tag = tag
+
+        async def aclose(self) -> None:
+            closed.append(self._tag)
+
+    ci = CompositeInvoker(Settings(_env_file=None, agent_mode="fake"))  # type: ignore[call-arg]
+    ci._classifier = _Closer("c")  # type: ignore[assignment]
+    ci._resolver = _Closer("r")  # type: ignore[assignment]
+    await ci.aclose()
+    assert closed == ["c", "r"]
+
+
 @pytest.mark.parametrize(
     ("endpoint", "expected"),
     [

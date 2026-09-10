@@ -98,17 +98,32 @@ class Settings(BaseSettings):
             "HELPDESK_RESOLVER_AGENT_ENDPOINT", "AGENT_RESOLVER_RESPONSES_ENDPOINT"
         ),
     )
+    orchestrator_agent_endpoint: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "HELPDESK_ORCHESTRATOR_AGENT_ENDPOINT", "AGENT_ORCHESTRATOR_RESPONSES_ENDPOINT"
+        ),
+    )
 
     # --- Behaviour ------------------------------------------------------
     # Entry-point role for the shared ``main.py`` deploy shim; set per-service in
     # ``azure.yaml``. Only matters when a single zip hosts more than one agent.
-    agent_role: Literal["classifier", "resolver"] = "classifier"
+    agent_role: Literal["classifier", "resolver", "orchestrator"] = "classifier"
     agent_mode: AgentMode = "local"
     classifier_mode: AgentMode | None = None
     resolver_mode: AgentMode | None = None
     # Tuned in Phase 1: on the 49-row labeled set, correct predictions scored
     # >= 0.85, the one misclassification 0.75, ambiguous requests < 0.6.
     confidence_threshold: float = Field(default=0.8, ge=0.0, le=1.0)
+
+    # --- Tracing (Phase 4) -------------------------------------------
+    # AzureAIOpenTelemetryTracer is attached to the orchestrator graph. With an
+    # App Insights connection string it exports spans; without one it still emits
+    # spans on the local TracerProvider (so ``trace=`` shows in logs and W3C
+    # ``traceparent`` is injected on the deployed-agent calls). Off => no callback.
+    tracing_enabled: bool = True
+    trace_content_recording: bool = True
+    trace_sampling_ratio: float = Field(default=1.0, ge=0.0, le=1.0)
 
     # --- Escalation store ---------------------------------------------
     escalation_store: Literal["json", "table"] = "json"
@@ -145,6 +160,12 @@ class Settings(BaseSettings):
     def resolver_responses_url(self) -> str:
         """The `POST /responses` URL of the deployed resolver agent."""
         return self._agent_responses_url(self.resolver_agent_endpoint, self.resolver_agent_name)
+
+    def orchestrator_responses_url(self) -> str:
+        """The `POST /responses` URL of the deployed orchestrator agent."""
+        return self._agent_responses_url(
+            self.orchestrator_agent_endpoint, self.orchestrator_agent_name
+        )
 
     def index_for(self, category: str) -> str:
         """Search index name for a category. ``billing`` has no KB — it escalates."""
