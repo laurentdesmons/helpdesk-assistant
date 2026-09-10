@@ -9,9 +9,8 @@ precision/recall, and citation validity (every cited doc_id must exist in the KB
 Writes a JSON report to `.local/eval/`. With `--gate`, exits non-zero on any
 failed threshold.
 
-No LLM judge: a real groundedness eval needs a labeled set against the *actual*
-KB, not the placeholder docs (README §7). The `--judge` flag wires
-`azure-ai-evaluation` groundedness if it's installed; it is off by default.
+No LLM judge — the resolver eval is code-based. The `--judge` flag wires
+`azure-ai-evaluation` groundedness if it's installed; off by default.
 """
 
 from __future__ import annotations
@@ -248,8 +247,7 @@ def _maybe_judge(enabled: bool) -> None:
 
     console.print(
         f"[dim]judge model {judge_model(get_settings())!r} available — "
-        "groundedness scoring is scaffolded but needs a real-KB labeled set "
-        "(README §7 blocking gap); not run.[/dim]"
+        "groundedness scoring is scaffolded but not run.[/dim]"
     )
 
 

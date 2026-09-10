@@ -20,7 +20,7 @@ scenario set, `verify_deploy.py orchestrator`, `scripts/verify_trace_propagation
 it. **100% outcome accuracy on the scenario set (fake + in-process); 100%
 local↔remote parity (14/14); `verify_deploy.py orchestrator` 5/5 through the
 deployed graph; one correlated App Insights trace spans orchestrator → classifier
-+ resolver.** Next: Phase 5 (durable escalation queue + review UI).*
++ resolver.**
 
 ## 1. Category taxonomy
 - `billing`
@@ -44,7 +44,7 @@ LangGraph orchestrator (hosted agent in Foundry)
 
 - Classifier and Resolver are **two independently deployed Foundry-hosted agents**, each built with Microsoft Agent Framework.
 - LangGraph is the orchestrator, itself packaged as a hosted agent in Foundry, calling both directly via each agent's own Responses/Invocations protocol endpoint — plain HTTP call, no A2A. Reasoning: A2A on Foundry is preview-only and Microsoft explicitly doesn't recommend it for production; we don't need its discovery/negotiation layer since LangGraph already knows exactly which agent to call. Auth via managed identity (standard Foundry-to-Foundry call).
-- Escalation = **flagged state**, no ticketing system integration — a human picks the request up from a queue/UI (mechanism TBD, Phase 5).
+- Escalation = **flagged state**, no ticketing system integration — a human picks the request up from a queue/UI.
 - Tracing: `langchain-azure-ai`'s `AzureAIOpenTelemetryTracer` attached to the LangGraph app, emitting per-node/edge OTel spans to Application Insights, visible in Foundry Observability > Traces. Each Foundry-hosted agent (Classifier, Resolver) also emits its own spans natively. **Trace-context propagation across the direct endpoint calls is VERIFIED** (`scripts/verify_trace_propagation.py`, Phase 4 part 2): the orchestrator injects W3C `traceparent` on each agent call, the Foundry Responses host extracts it, and one App Insights `operation_Id` spans the orchestrator's graph-node spans, the classifier's `chat gpt-4.1-mini` span, and the resolver's `chat gpt-5.4-mini` + `execute_tool search_knowledge_base` spans.
 
 **Phase 4 build.** `src/helpdesk/agents/orchestrator/graph.py` is a pure
@@ -78,7 +78,7 @@ and that every escalation wrote a record.
 `azure.yaml` `orchestrator` service: `HELPDESK_AGENT_MODE=remote`, the two sibling
 endpoints from `${AGENT_{CLASSIFIER,RESOLVER}_RESPONSES_ENDPOINT}`,
 `HELPDESK_ESCALATION_STORE_PATH=/tmp/helpdesk/escalations.json` (the container root
-FS is read-only; ephemeral until Phase 5's Azure Table store),
+FS is read-only; ephemeral),
 `OTEL_SERVICE_NAME=helpdesk-orchestrator` (so its graph-node spans aren't
 attributed to `unknown_service`). App Insights `appi-helpdesk-dev` (workspace-based
 on `log-helpdesk-dev`) connected to the project → the runtime injects
@@ -104,11 +104,11 @@ root `operation_Id`) both pass.
 
 **Confirmed:** below-threshold confidence → route to `escalate_human` regardless of category, rather than guessing.
 
-**Phase 1 result (`gpt-4.1-mini`):** `confidence_threshold = 0.80`. On the 49-row synthetic labeled set the classifier scores **100%** accuracy, in-process and through the deployed endpoint (100% local↔remote category parity). All correct predictions land ≥ 0.70; the one genuinely ambiguous procurement request (`s14`, "licensed copy of… software approved for my team") is classified correctly at 0.70 and so escalates at threshold 0.80 — the intended behaviour. Both `ambiguous`-flagged rows fall below 0.80. Re-tune against real request samples when available. *(The earlier Haiku build scored 98% at the same threshold; swapped for the reasons below.)*
+**Phase 1 result (`gpt-4.1-mini`):** `confidence_threshold = 0.80`. On the 49-row synthetic labeled set the classifier scores **100%** accuracy, in-process and through the deployed endpoint (100% local↔remote category parity). All correct predictions land ≥ 0.70; the one genuinely ambiguous procurement request (`s14`, "licensed copy of… software approved for my team") is classified correctly at 0.70 and so escalates at threshold 0.80 — the intended behaviour. Both `ambiguous`-flagged rows fall below 0.80. *(The earlier Haiku build scored 98% at the same threshold; swapped for the reasons below.)*
 
 **Confirmed:** Model = **`gpt-4.1-mini`** (Foundry model catalog, portal-managed), called through Microsoft Agent Framework's **`FoundryChatClient`** against the **project endpoint** (OpenAI-family Responses API). *Was* Claude Haiku 4.5 via `AnthropicFoundryClient`; switched after the first deploy — the prerelease `agent-framework-anthropic` + Anthropic-on-Foundry path threw frequent transient `server_error`s in the hosted container, and calling the account-level Anthropic endpoint needed an extra account-scope RBAC grant on the agent identity. `FoundryChatClient` on the project endpoint runs under the agent MI's *implicit* inference access (no grant), shares one client stack with the resolver, and drops a prerelease dep. Structured output (`Classification`) via `response_format`; the JSON schema stays constraint-free (strict structured-output validators — Claude and OpenAI alike — reject numeric `minimum`/`maximum`), so bounds are enforced in a Pydantic validator. Framework stays Microsoft Agent Framework.
 
-**Deployment (Phase 1 deploy).** The classifier ships as a Foundry **Hosted Agent** — `src/helpdesk/agents/classifier/agent.py`'s builder wrapped by `agent-framework-foundry-hosting`'s **`ResponsesHostServer`** (`POST /responses` + `GET /readiness`, port 8088), started via a root `main.py` shim. `azd` code-deploy mode (`azure.yaml` `classifier` service, `dependencyResolution: remote_build`), no Dockerfile. `response_format=Classification` is baked into the agent's `default_options` so structured output holds when the host calls `agent.run()` directly. The orchestrator (and `scripts/verify_deploy.py`) reach it through `agent_gateway.RemoteInvoker`: async httpx POST `{"input": <prompt>, "stream": false}` to `.../agents/helpdesk-classifier/endpoint/protocols/openai/responses`, bearer token scope `https://ai.azure.com/.default`, with JSON-parse + retry-with-backoff (transient `status: failed` and unparseable responses both consume an attempt). App Insights / trace-context propagation is deferred to Phase 4.
+**Deployment (Phase 1 deploy).** The classifier ships as a Foundry **Hosted Agent** — `src/helpdesk/agents/classifier/agent.py`'s builder wrapped by `agent-framework-foundry-hosting`'s **`ResponsesHostServer`** (`POST /responses` + `GET /readiness`, port 8088), started via a root `main.py` shim. `azd` code-deploy mode (`azure.yaml` `classifier` service, `dependencyResolution: remote_build`), no Dockerfile. `response_format=Classification` is baked into the agent's `default_options` so structured output holds when the host calls `agent.run()` directly. The orchestrator (and `scripts/verify_deploy.py`) reach it through `agent_gateway.RemoteInvoker`: async httpx POST `{"input": <prompt>, "stream": false}` to `.../agents/helpdesk-classifier/endpoint/protocols/openai/responses`, bearer token scope `https://ai.azure.com/.default`, with JSON-parse + retry-with-backoff (transient `status: failed` and unparseable responses both consume an attempt). App Insights / trace-context propagation landed in Phase 4.
 
 ## 4. Resolver Agent — contract
 
@@ -126,7 +126,7 @@ root `operation_Id`) both pass.
 
 **Confirmed:** separate indexes — `support-index` and `hr-index`. Keeps permissioning and content lifecycle independent.
 
-**Confirmed:** Model = GPT-5.4-mini (dev only), via Foundry model catalog + Microsoft Agent Framework's `FoundryChatClient`. Fallback: gpt-5-mini if 5.4 isn't enabled on the subscription. To be re-evaluated against Sonnet 5 / full GPT-5 once real eval results are in (see Section 7) — mini-tier carries real accuracy risk on the groundedness judgment specifically.
+**Confirmed:** Model = GPT-5.4-mini (dev only), via Foundry model catalog + Microsoft Agent Framework's `FoundryChatClient`. Fallback: gpt-5-mini if 5.4 isn't enabled on the subscription.
 
 **Output shape (`ResolverOutput`, folded in from `contracts.py`):**
 ```json
@@ -190,14 +190,8 @@ cited `doc_id` must exist in the KB — derived from `docs/` via the pure
 `iter_chunks`). 35-row labeled set at `eval/datasets/resolver_labeled.jsonl`;
 gpt-5.4-mini scores 100% on every metric locally.
 
-The LLM-judge evaluators below are **scaffolded but not run** — `--judge` wires
-`azure-ai-evaluation` (in the `[eval]` extra) if installed, and a real
-groundedness score still needs a labeled set against the *actual* KB (see the
-blocking gap). Foundry built-in RAG/agent evaluators, for when that lands:
-- Groundedness (response supported by retrieved context, not fabricated)
-- Relevance (response addresses the query)
-- Retrieval Quality (isolates retrieval failures from generation failures)
-- Tool Call Accuracy / Tool Output Utilization (resolver calls Azure AI Search as a tool)
+The `--judge` flag wires `azure-ai-evaluation` groundedness (in the `[eval]`
+extra) if installed, but is **off by default** — the resolver eval is code-based.
 
 **Consolidated gate (Phase 4.5) — `eval/run_all.py`.** One command, one non-zero
 exit over all three code-based suites (`classifier_eval` → `resolver_eval` →
@@ -209,16 +203,9 @@ and `uv run python -m eval.run_all --remote` after — the latter points the
 classifier + resolver at the deployed agents, relaxes the accuracy floors, and
 `--compare`s each suite against its newest local report for the ≥ 95% parity
 check. `--only` subsets the suites; `--min-*` overrides a threshold. It is **not**
-wired into `azd` (no predeploy hook) and there is no CI yet — both deliberate;
-the runner is structured so a future workflow can call it unchanged. Foundry
-cloud evaluators as a pre-deploy gate + Azure Monitor quality alerts remain
-future work (blocked on the real-KB groundedness set below).
+wired into `azd` (no predeploy hook) and there is no CI.
 
 **Judge model — do not use mini-tier.** Microsoft's own internal evaluator-quality study found Groundedness has a real score-quality gap by judge tier and that smaller judges produce worse scores, not a fixable problem, unlike the other evaluators tested. Use Sonnet 5 or full GPT-5 as the judge, independent of what model the resolver itself runs on.
-
-**Workflow:** local fast-iteration evals via Microsoft Agent Framework's `EvaluateAsync` during dev → Foundry cloud evaluators as pre-deployment gate → production monitoring post-deploy via Azure Monitor with quality-threshold alerting.
-
-**Blocking gap:** a real groundedness eval needs a labeled test set against the *actual* KB, not the placeholder sample docs — those only validate pipeline mechanics.
 
 ## 5. KB / grounding design (Azure AI Search)
 
@@ -237,21 +224,16 @@ search tool (the Phase 3 resolver wraps `KnowledgeBaseSearch.search()` in its ow
   **account-level** `https://<acct>.services.ai.azure.com/openai/v1` endpoint —
   the project-scoped `.../api/projects/<proj>/openai/v1` route proxies
   chat/responses but not `/embeddings`. `-small` is ample for a small, flat,
-  lexically-distinct KB where the hybrid + semantic ranker carries retrieval;
-  **re-evaluate `text-embedding-3-large` when the real (larger, multi-section,
-  possibly multi-hop) KB replaces the samples.**
+  lexically-distinct KB where the hybrid + semantic ranker carries retrieval.
 - **Index build** (`pipeline.py` + `scripts/build_kb.py`): chunk → embed locally →
   `merge_or_upload` whole documents (vectors included). No indexer, no skillset —
-  the corpus embeds in <1s and we want per-chunk logs + `--dry-run`. **Revisit
-  integrated vectorization + a scheduled indexer when the real KB is large and
-  frequently updated.**
+  the corpus embeds in <1s and we want per-chunk logs + `--dry-run`.
 - **Query** (`client.py`): HNSW/cosine vector arm + BM25 keyword arm + semantic
   ranker (`Settings.search_query_type` = `vector_semantic_hybrid` default;
   `vector_hybrid` / `keyword` for eval ablation). Returns `SearchResult`
   (→ `contracts.Citation` via `.to_citation()`).
-- **Agentic / Knowledge-Base mode** — still just the `Settings.agentic_search`
-  flag; multi-hop reasoning over Knowledge Bases lands if/when the real KB needs
-  multi-document synthesis.
+- **Agentic / Knowledge-Base mode** — the `Settings.agentic_search` flag (off by
+  default).
 - **Provisioning** — manual (consistent with portal-managed models): Azure AI
   Search **Basic** tier, semantic ranker on the **free** plan, AAD auth
   (`DefaultAzureCredential`); `text-embedding-3-small` deployed via the portal
@@ -264,14 +246,8 @@ search tool (the Phase 3 resolver wraps `KnowledgeBaseSearch.search()` in its ow
   inference access does not cover.
 
 **Sample content:** placeholder KB docs (`docs/`) — fictional, generic, marked
-`status: SAMPLE PLACEHOLDER`. Not real policy. Swapped for actual documents
-before production; those only validate pipeline mechanics.
-
-**Still open — needed before real indexing:**
-- Real policy/KB documents: format (PDF, Word, HTML, Confluence export)?
-- Approximate volume (# of docs, size) — affects chunking strategy, `-small` vs
-  `-large`, and semantic vs. agentic mode.
-- Update frequency — push rebuild vs. integrated vectorization + scheduled indexer.
+`status: SAMPLE PLACEHOLDER`. Not real policy; they validate pipeline mechanics
+only.
 
 ## 6. Escalation state schema (draft)
 
@@ -284,5 +260,3 @@ before production; those only validate pipeline mechanics.
   "created_at": "iso8601"
 }
 ```
-
-Where this queue lives (Foundry-native construct vs. external store + custom UI) — Phase 5, not blocking now.

@@ -66,8 +66,7 @@ class Settings(BaseSettings):
     # --- Azure AI Search (Phase 2) ------------------------------------
     search_endpoint: str | None = None
     # -small (1536-d) is ample for the small, flat, lexically-distinct KB; the
-    # hybrid + semantic ranker carries retrieval. Re-evaluate -large when the
-    # real (larger, multi-section) KB replaces the placeholder docs.
+    # hybrid + semantic ranker carries retrieval.
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
     support_index: str = "support-index"

@@ -8,7 +8,7 @@ IT Help Desk Agent Assistant. LangGraph orchestrator + two Microsoft Agent Frame
 ## Status
 
 **Phases:** 0 scaffold · 0.5 provision · 1 classifier · 2 KB/Search · 3 resolver ·
-4 orchestrator+tracing · 4.5 eval gate · 5 escalation queue. Full plan:
+4 orchestrator+tracing · 4.5 eval gate. Full plan:
 `.claude/plans/you-are-my-ai-hidden-fox.md`.
 
 **Done:**
@@ -31,7 +31,7 @@ IT Help Desk Agent Assistant. LangGraph orchestrator + two Microsoft Agent Frame
   `RemoteInvoker` (httpx to `.../protocols/openai/responses` + retry/backoff),
   `scripts/verify_deploy.py`, `requirements.txt` + `.azdignore`. Remote eval 100%,
   100% local↔remote parity. Hosted-call latency ~15–18s (cross-region eastus2↔SEA
-  + per-call session sandbox) — functional, revisit if it matters.
+  + per-call session sandbox) — functional.
 
 - Phase 2 — **KB / Azure AI Search layer built and verified end-to-end.**
   `src/helpdesk/search/` (`chunking` pure H2-splitter, `embeddings` =
@@ -141,9 +141,7 @@ IT Help Desk Agent Assistant. LangGraph orchestrator + two Microsoft Agent Frame
   accuracy floors (0.90/0.85/0.85), and `--compare`s each suite against its
   newest prior local report (parity ≥ `--min-parity`, default 0.95); `--min-*`
   flags override per suite. No metrics of its own — pure orchestration. Not wired
-  into `azd` (no `hooks.predeploy`) — run it by hand pre-deploy. No CI yet.
-
-**Next:** Phase 5 — durable escalation store (Azure Table) + review UI.
+  into `azd` (no `hooks.predeploy`) — run it by hand pre-deploy. No CI.
 
 ## Golden rules
 
@@ -245,7 +243,7 @@ the graph can run against the deployed agents while itself in-process.
   — the project-scoped `.../api/projects/<proj>/openai/v1` passthrough proxies
   chat/responses but **NOT `/embeddings`** (bare 404). `search/embeddings.py`
   `_account_openai_v1_url()` derives it from `foundry_project_endpoint`. `-small`
-  chosen for the small flat KB; revisit `-large` for the real corpus.
+  chosen for the small flat KB.
 - **Resolver** (Phase 3): `gpt-5.4-mini` (fallback `gpt-5-mini` — manual
   `HELPDESK_RESOLVER_MODEL` override, the builder does no availability check) via
   `FoundryChatClient` on the project endpoint. Retrieval is a custom MAF **`@tool`**
@@ -279,7 +277,7 @@ returns a `HelpdeskResult`.
 - resolver not grounded → escalate reason `not_grounded`.
 
 Escalation = an `EscalationRecord` written to the store in `finalize` — the
-graph's single I/O point (JSON file dev, Azure Table prod).
+graph's single I/O point (JSON file).
 
 ## KB / search
 
@@ -293,11 +291,10 @@ ranker (`Settings.search_query_type` = `vector_semantic_hybrid` | `vector_hybrid
 | `keyword`). `KnowledgeBaseSearch.search(category, query)` (`search/client.py`)
 is the resolver seam — Phase 3's `make_search_tool` wraps it in a MAF `@tool` that
 returns JSON snippets; `SearchResult.to_citation()` → `contracts.Citation`.
-Agentic / Knowledge Base mode is a flag (`Settings.agentic_search`) for when the
-real KB arrives. Build: `uv run python scripts/build_kb.py --recreate`
+Agentic / Knowledge Base mode is a flag (`Settings.agentic_search`, off by
+default). Build: `uv run python scripts/build_kb.py --recreate`
 (`--dry-run` chunks only, no network). Query: `uv run python scripts/search_kb.py
---category support --query "..."`. Re-evaluate `-large` + integrated vectorization
-when the real KB lands.
+--category support --query "..."`.
 
 ## Common commands
 

@@ -135,7 +135,7 @@ services:
       # from the Foundry runtime's native instrumentation.)
       OTEL_SERVICE_NAME: helpdesk-orchestrator
       # The container's working dir is read-only; the JSON escalation store needs a
-      # writable path. Ephemeral (lost on restart) — Phase 5 swaps in Azure Table.
+      # writable path. Ephemeral (lost on restart).
       HELPDESK_ESCALATION_STORE_PATH: /tmp/helpdesk/escalations.json
       HELPDESK_LOG_LEVEL: info
     container:

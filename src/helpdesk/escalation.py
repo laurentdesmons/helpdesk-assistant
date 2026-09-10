@@ -1,8 +1,7 @@
 """Escalation store — where flagged requests wait for a human (README §6).
 
-Phase 0 ships an on-disk JSON store for local dev. Phase 5 adds an Azure Table
-implementation behind the same interface; ``get_escalation_store`` switches on
-``Settings.escalation_store``.
+An on-disk JSON store, behind the ``EscalationStore`` interface;
+``get_escalation_store`` switches on ``Settings.escalation_store``.
 
 The store is append-and-update by ``request_id`` (the natural key). Writes are
 serialized with a file lock and made atomic with a temp-file rename so a crashed
@@ -115,6 +114,6 @@ def get_escalation_store(settings: Settings) -> EscalationStore:
     if settings.escalation_store == "json":
         return JSONFileEscalationStore(settings.escalation_store_path)
     raise NotImplementedError(
-        f"escalation_store={settings.escalation_store!r} is not available yet "
-        "(Azure Table store lands in Phase 5)."
+        f"escalation_store={settings.escalation_store!r} is not available "
+        "(only 'json' is implemented)."
     )
